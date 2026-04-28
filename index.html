@@ -1,921 +1,923 @@
-<!DOCTYPE html>
+const fbApp=initializeApp(fbConfig);
+const auth=getAuth(fbApp);
+const db=getFirestore(fbApp);
+
+// FCM初期化（iOS PWAはサポート限定のため安全に初期化）
+let messaging=null;
+try{
+  messaging=getMessaging(fbApp);
+  // フォアグラウンド通知の受信
+  onMessage(messaging,function(payload){
+    console.log("フォアグラウンド通知:",payload);
+    // アプリが開いているときはブラウザ通知APIで表示
+    if(Notification.permission==="granted"){
+      new Notification(payload.notification?.title||"Gorilla Quest",{
+        body:payload.notification?.body||"",
+        icon:"/gorilla-quest/stage2.png"
+      });
+    }
+  });
+}catch(e){console.log("FCM非対応環境:",e);}
+
+// FCMトークンを取得してFirestoreに保存
+// VAPID_KEYはFirebaseコンソール→プロジェクト設定→Cloud Messagingで取得
+const VAPID_KEY="YOUR_VAPID_KEY_HERE";
+
+async function requestNotificationPermission(uid){
+  if(!messaging)return;
+  try{
+    const permission=await Notification.requestPermission();
+    if(permission!=="granted"){
+      console.log("通知許可が拒否されました");
+      return;
+    }
+    // Service Workerを登録
+    const reg=await navigator.serviceWorker.register("/gorilla-quest/firebase-messaging-sw.js");
+    const token=await getToken(messaging,{
+      vapidKey:VAPID_KEY,
+      serviceWorkerRegistration:reg
+    });
+    if(token){
+      await updateDoc(doc(db,"users",uid),{fcmToken:token});
+      console.log("FCMトークン保存完了");
+    }
+  }catch(e){console.log("FCMトークン取得失敗:",e);}
+}
+
+// 通知許可済みかチェック
+function isNotificationGranted(){
+  return typeof Notification!=="undefined"&&Notification.permission==="granted";
+}
+// iOS PWAではgetMessaging()がエラーになる場合があるため安全に初期化
+let messaging=null;
+try<!DOCTYPE html>
 <html lang="ja">
 <head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
-  <meta name="theme-color" content="#000000" />
-  <meta name="apple-mobile-web-app-capable" content="yes" />
-  <meta name="apple-mobile-web-app-status-bar-style" content="default" />
-  <meta name="apple-mobile-web-app-title" content="Keiba Note" />
-  <title>Keiba Note</title>
-  <link rel="manifest" href="./manifest.json" />
-  <style>
-    /* ===== リセット & ベース ===== */
-    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-    body {
-      font-family: -apple-system, system-ui, BlinkMacSystemFont, "Hiragino Sans", sans-serif;
-      background: #f5f5f5;
-      color: #1a1a1a;
-      min-height: 100vh;
-      -webkit-text-size-adjust: 100%;
-    }
-    /* ===== 画面管理 ===== */
-    .screen { display: none; }
-    .screen.active { display: block; }
-
-    /* ===== ヘッダー ===== */
-    .header {
-      position: sticky; top: 0; z-index: 100;
-      background: rgba(245,245,245,0.85);
-      backdrop-filter: saturate(180%) blur(12px);
-      -webkit-backdrop-filter: saturate(180%) blur(12px);
-      padding: 16px 20px 12px;
-      border-bottom: 1px solid rgba(0,0,0,0.08);
-    }
-    .header-row { display: flex; align-items: center; justify-content: space-between; }
-    .header h1 { font-size: 22px; font-weight: 700; letter-spacing: -0.5px; }
-    .header-sub { font-size: 13px; color: #888; margin-top: 2px; }
-
-    /* ===== カード ===== */
-    .card {
-      background: #fff;
-      border-radius: 16px;
-      box-shadow: 0 2px 12px rgba(0,0,0,0.07);
-      padding: 18px;
-      margin: 12px 16px;
-    }
-
-    /* ===== ボタン系 ===== */
-    .btn {
-      display: inline-flex; align-items: center; justify-content: center;
-      border: none; cursor: pointer; font-family: inherit;
-      font-weight: 600; transition: all 0.15s ease;
-      -webkit-tap-highlight-color: transparent;
-    }
-    .btn:active { transform: scale(0.96); }
-    .btn-primary {
-      background: #1a1a1a; color: #fff;
-      border-radius: 14px; padding: 14px 24px;
-      font-size: 16px; width: 100%;
-    }
-    .btn-secondary {
-      background: #f0f0f0; color: #1a1a1a;
-      border-radius: 12px; padding: 10px 18px;
-      font-size: 14px;
-    }
-    .btn-danger {
-      background: #fff0f0; color: #d00;
-      border-radius: 12px; padding: 10px 18px;
-      font-size: 14px;
-    }
-    .btn-icon {
-      background: #1a1a1a; color: #fff;
-      border-radius: 50%; width: 52px; height: 52px;
-      font-size: 26px; box-shadow: 0 4px 16px rgba(0,0,0,0.25);
-    }
-    /* トグルボタン群 */
-    .toggle-group { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
-    .toggle-btn {
-      border: 1.5px solid #e0e0e0;
-      background: #fff; color: #555;
-      border-radius: 20px; padding: 7px 14px;
-      font-size: 13px; font-weight: 500;
-      cursor: pointer; transition: all 0.15s;
-      -webkit-tap-highlight-color: transparent;
-    }
-    .toggle-btn.active {
-      background: #1a1a1a; color: #fff; border-color: #1a1a1a;
-    }
-    .toggle-btn:active { transform: scale(0.95); }
-
-    /* ===== フォーム ===== */
-    .form-section { margin-bottom: 24px; }
-    .form-label {
-      font-size: 13px; font-weight: 600; color: #888;
-      text-transform: uppercase; letter-spacing: 0.5px;
-      margin-bottom: 8px; display: block;
-    }
-    .form-input {
-      width: 100%; border: 1.5px solid #e8e8e8;
-      border-radius: 12px; padding: 12px 14px;
-      font-size: 16px; font-family: inherit;
-      background: #fafafa; outline: none;
-      transition: border-color 0.2s;
-    }
-    .form-input:focus { border-color: #1a1a1a; background: #fff; }
-    textarea.form-input { resize: none; min-height: 80px; }
-
-    /* ===== 一覧画面 ===== */
-    #screen-list .fab-wrap {
-      position: fixed; bottom: calc(24px + env(safe-area-inset-bottom));
-      right: 24px; z-index: 200;
-    }
-    .list-empty {
-      text-align: center; padding: 60px 20px; color: #bbb;
-    }
-    .list-empty .emoji { font-size: 48px; margin-bottom: 12px; }
-    .list-empty p { font-size: 15px; }
-
-    /* 一覧カード */
-    .race-card { cursor: pointer; transition: transform 0.15s, box-shadow 0.15s; }
-    .race-card:active { transform: scale(0.98); box-shadow: 0 1px 6px rgba(0,0,0,0.06); }
-    .race-card-header { display: flex; justify-content: space-between; align-items: flex-start; }
-    .race-card-title { font-size: 17px; font-weight: 700; }
-    .race-card-date { font-size: 12px; color: #aaa; margin-top: 2px; }
-    .race-card-pnl {
-      font-size: 18px; font-weight: 700;
-      padding: 4px 10px; border-radius: 10px;
-    }
-    .pnl-plus { color: #007aff; background: #eef4ff; }
-    .pnl-minus { color: #d00; background: #fff0f0; }
-    .pnl-zero { color: #888; background: #f0f0f0; }
-    .race-card-meta { margin-top: 10px; display: flex; gap: 8px; flex-wrap: wrap; }
-    .badge {
-      font-size: 12px; font-weight: 500; color: #666;
-      background: #f4f4f4; border-radius: 8px; padding: 3px 9px;
-    }
-
-    /* ===== ツールバー（バックアップ） ===== */
-    .toolbar {
-      display: flex; gap: 10px; padding: 8px 16px 0;
-    }
-    .toolbar .btn { font-size: 13px; padding: 8px 14px; flex: 1; }
-
-    /* ===== 新規作成・編集画面 ===== */
-    #screen-edit .page-header {
-      display: flex; align-items: center; gap: 12px; padding: 16px 20px 12px;
-      border-bottom: 1px solid rgba(0,0,0,0.08);
-    }
-    .back-btn {
-      background: #f0f0f0; border: none; border-radius: 50%;
-      width: 36px; height: 36px; font-size: 18px;
-      cursor: pointer; display: flex; align-items: center; justify-content: center;
-      -webkit-tap-highlight-color: transparent;
-    }
-    .page-title { font-size: 18px; font-weight: 700; }
-    .edit-body { padding: 0 16px 120px; }
-
-    /* 注目馬カード */
-    .horse-card {
-      background: #fafafa; border: 1.5px solid #efefef;
-      border-radius: 14px; padding: 14px; margin-bottom: 12px;
-    }
-    .horse-card-header {
-      display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;
-    }
-    .horse-card-title { font-size: 14px; font-weight: 700; color: #555; }
-    .remove-btn {
-      background: none; border: none; color: #ccc;
-      font-size: 20px; cursor: pointer; padding: 0 4px;
-      -webkit-tap-highlight-color: transparent;
-    }
-    .remove-btn:active { color: #d00; }
-
-    /* 星評価 */
-    .star-group { display: flex; gap: 6px; margin-top: 8px; }
-    .star-btn {
-      font-size: 24px; background: none; border: none;
-      cursor: pointer; opacity: 0.3; transition: opacity 0.15s;
-      -webkit-tap-highlight-color: transparent;
-    }
-    .star-btn.active { opacity: 1; }
-
-    /* 金額調整 */
-    .amount-row { display: flex; align-items: center; gap: 10px; margin-top: 8px; }
-    .amount-display {
-      flex: 1; text-align: center; font-size: 20px; font-weight: 700;
-      background: #f0f0f0; border-radius: 12px; padding: 10px;
-    }
-    .amount-btn {
-      background: #1a1a1a; color: #fff; border: none;
-      border-radius: 12px; padding: 10px 16px;
-      font-size: 14px; font-weight: 600; cursor: pointer;
-      -webkit-tap-highlight-color: transparent;
-    }
-    .amount-btn:active { transform: scale(0.95); }
-    .amount-btn.minus { background: #f0f0f0; color: #1a1a1a; }
-
-    /* 買い目ブロック */
-    .bet-block {
-      background: #fafafa; border: 1.5px solid #efefef;
-      border-radius: 14px; padding: 14px; margin-bottom: 12px;
-    }
-    .result-group { display: flex; gap: 8px; margin-top: 8px; }
-    .result-btn {
-      flex: 1; border: 1.5px solid #e0e0e0;
-      background: #fff; color: #555; border-radius: 10px;
-      padding: 8px 4px; font-size: 13px; font-weight: 600;
-      cursor: pointer; text-align: center;
-      -webkit-tap-highlight-color: transparent;
-    }
-    .result-btn.active-hit { background: #007aff; color: #fff; border-color: #007aff; }
-    .result-btn.active-miss { background: #d00; color: #fff; border-color: #d00; }
-    .result-btn.active-none { background: #888; color: #fff; border-color: #888; }
-
-    /* ===== 詳細画面 ===== */
-    #screen-detail .page-header {
-      display: flex; align-items: center; gap: 12px; padding: 16px 20px 12px;
-      border-bottom: 1px solid rgba(0,0,0,0.08);
-    }
-    .detail-body { padding: 0 16px 120px; }
-    .detail-section-title {
-      font-size: 13px; font-weight: 600; color: #888;
-      text-transform: uppercase; letter-spacing: 0.5px;
-      margin: 20px 0 8px;
-    }
-    .detail-row { display: flex; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid #f0f0f0; }
-    .detail-key { font-size: 14px; color: #888; }
-    .detail-val { font-size: 14px; font-weight: 600; }
-    .detail-pnl { font-size: 28px; font-weight: 800; text-align: center; padding: 16px; }
-    .role-tag {
-      display: inline-block; border-radius: 8px; padding: 2px 10px;
-      font-size: 12px; font-weight: 700;
-    }
-    .role-本命 { background: #ff3b30; color: #fff; }
-    .role-対抗 { background: #007aff; color: #fff; }
-    .role-単穴 { background: #ff9500; color: #fff; }
-    .role-穴   { background: #34c759; color: #fff; }
-    .role-消し { background: #e0e0e0; color: #888; }
-
-    /* ===== 騎手選択モーダル ===== */
-    .modal-overlay {
-      display: none; position: fixed; inset: 0; z-index: 500;
-      background: rgba(0,0,0,0.4); align-items: flex-end; justify-content: center;
-    }
-    .modal-overlay.open { display: flex; }
-    .modal-sheet {
-      background: #fff; border-radius: 24px 24px 0 0;
-      padding: 20px 20px calc(20px + env(safe-area-inset-bottom));
-      width: 100%; max-height: 70vh; overflow-y: auto;
-    }
-    .modal-title { font-size: 16px; font-weight: 700; margin-bottom: 14px; }
-    .jockey-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; }
-    .jockey-item {
-      border: 1.5px solid #e8e8e8; border-radius: 12px;
-      padding: 10px; text-align: center; font-size: 14px;
-      cursor: pointer; -webkit-tap-highlight-color: transparent;
-      transition: all 0.15s;
-    }
-    .jockey-item:active { background: #f5f5f5; }
-    .modal-input-row { display: flex; gap: 8px; margin-top: 14px; }
-    .modal-input-row input {
-      flex: 1; border: 1.5px solid #e8e8e8; border-radius: 12px;
-      padding: 10px 14px; font-size: 15px; font-family: inherit; outline: none;
-    }
-    .modal-input-row input:focus { border-color: #1a1a1a; }
-    .modal-input-row .btn { padding: 10px 16px; font-size: 14px; border-radius: 12px; }
-
-    /* ===== 確認ダイアログ ===== */
-    .confirm-overlay {
-      display: none; position: fixed; inset: 0; z-index: 600;
-      background: rgba(0,0,0,0.4); align-items: center; justify-content: center;
-    }
-    .confirm-overlay.open { display: flex; }
-    .confirm-box {
-      background: #fff; border-radius: 20px; padding: 28px 24px;
-      width: calc(100% - 48px); max-width: 320px; text-align: center;
-    }
-    .confirm-box h3 { font-size: 17px; font-weight: 700; margin-bottom: 8px; }
-    .confirm-box p { font-size: 14px; color: #666; margin-bottom: 20px; }
-    .confirm-btns { display: flex; gap: 10px; }
-    .confirm-btns .btn { flex: 1; border-radius: 12px; padding: 12px; font-size: 15px; }
-  </style>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>Gorilla Quest</title>
+<link href="https://fonts.googleapis.com/css2?family=DotGothic16&display=swap" rel="stylesheet"/>
+<script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<style>
+*{box-sizing:border-box;margin:0;padding:0;}
+body{background:#0a0a1a;color:#fff;font-family:'DotGothic16',monospace;min-height:100vh;}
+button,select,input{font-family:'DotGothic16',monospace;}
+select,input{appearance:none;-webkit-appearance:none;}
+.dq-win{background:#000033;border:3px solid #fff;box-shadow:inset 0 0 0 1px #000066;}
+.dq-btn{background:#000033;border:2px solid #fff;color:#fff;cursor:pointer;padding:8px 12px;font-size:14px;text-align:left;transition:background 0.1s;font-family:'DotGothic16',monospace;}
+.dq-btn:hover{background:#000066;}
+.dq-btn.active{background:#000066;color:#ffdd00;}
+.dq-input{background:#000011;border:2px solid #4444aa;color:#fff;font-family:'DotGothic16',monospace;font-size:13px;padding:6px 8px;}
+@keyframes levelup{0%{opacity:0;transform:scale(0.8)}20%{opacity:1;transform:scale(1.05)}80%{opacity:1}100%{opacity:0}}
+@keyframes xpPop{0%{opacity:0;transform:translateY(0)}20%{opacity:1;transform:translateY(-8px)}80%{opacity:1;transform:translateY(-20px)}100%{opacity:0;transform:translateY(-32px)}}
+@keyframes flash{0%,100%{opacity:0}50%{opacity:0.7}}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:0.4}}
+@keyframes rouletteSpin{0%{transform:scale(1)}50%{transform:scale(1.1)}100%{transform:scale(1)}}
+@keyframes degrade{0%{opacity:0;transform:translateY(-10px)}30%{opacity:1;transform:translateY(0)}80%{opacity:1}100%{opacity:0}}
+</style>
 </head>
 <body>
+<div id="root"></div>
+<script type="module">
+// ── Firebase ──────────────────────────────────────────────
+import{initializeApp}from"https://www.gstatic.com/firebasejs/12.12.0/firebase-app.js";
+import{getAuth,signInWithPopup,GoogleAuthProvider,onAuthStateChanged,signOut}from"https://www.gstatic.com/firebasejs/12.12.0/firebase-auth.js";
+import{getFirestore,doc,setDoc,getDoc,updateDoc,addDoc,collection,query,where,onSnapshot,serverTimestamp,Timestamp,getDocs,writeBatch,increment}from"https://www.gstatic.com/firebasejs/12.12.0/firebase-firestore.js";
+import{getMessaging,getToken,onMessage}from"https://www.gstatic.com/firebasejs/12.12.0/firebase-messaging.js";
+import{getMessaging,getToken,onMessage}from"https://www.gstatic.com/firebasejs/12.12.0/firebase-messaging.js";
 
-<!-- ===========================
-     画面①：一覧
-=========================== -->
-<div id="screen-list" class="screen active">
-  <div class="header">
-    <div class="header-row">
-      <div>
-        <h1>🏇 Keiba Note</h1>
-        <div class="header-sub" id="list-summary">記録をロード中…</div>
-      </div>
-    </div>
-  </div>
+const fbConfig={apiKey:"AIzaSyChzYzgoK-k0Yk9ftiY7vMOeHDpYEOeDlw",authDomain:"gorilla-quest-b189c.firebaseapp.com",projectId:"gorilla-quest-b189c",storageBucket:"gorilla-quest-b189c.firebasestorage.app",messagingSenderId:"581762660070",appId:"1:581762660070:web:803c2a77a9341b4c89ad27"};
+const fbApp=initializeApp(fbConfig);
+const auth=getAuth(fbApp);
+const db=getFirestore(fbApp);
 
-  <!-- バックアップツールバー -->
-  <div class="toolbar">
-    <button class="btn btn-secondary" onclick="exportJSON()">📤 エクスポート</button>
-    <button class="btn btn-secondary" onclick="document.getElementById('import-file').click()">📥 インポート</button>
-    <input type="file" id="import-file" accept=".json" style="display:none" onchange="importJSON(event)" />
-  </div>
+// ── GQ ID（UID固定・1アカウント1ID）──────────────────────
+function makeGQId(uid){return"GQ-"+uid.slice(0,6).toUpperCase();}
 
-  <!-- 記録一覧 -->
-  <div id="race-list-container"></div>
+// ── Firestoreのゲームデータフィールド ────────────────────
+// usersドキュメントに保存するゲームデータのキー一覧
+const GAME_FIELDS=["totalXP","partXP","exercises","sessions","totalSessions","maxStreak","level","totalProtein","nightRecord","morningRecord","noonRecord","prCount","totalSets","maxWeight","maxDailySessions","workoutLog","menuRecords"];
 
-  <!-- 空状態 -->
-  <div id="empty-state" class="list-empty" style="display:none">
-    <div class="emoji">📝</div>
-    <p>記録がまだありません<br>＋ボタンで始めましょう！</p>
-  </div>
+// ── ユーザードキュメント保証＆データ復元 ─────────────────
+// 戻り値: { userData, gameData }
+async function loadUserFromFirestore(uid){
+  const ref=doc(db,"users",uid);
+  const snap=await getDoc(ref);
+  const gqId=makeGQId(uid);
 
-  <!-- 新規作成FAB -->
-  <div class="fab-wrap">
-    <button class="btn btn-icon" onclick="openEdit(null)">＋</button>
-  </div>
-</div>
-
-<!-- ===========================
-     画面②：新規作成・編集
-=========================== -->
-<div id="screen-edit" class="screen">
-  <div class="page-header">
-    <button class="back-btn" onclick="goList()">‹</button>
-    <div class="page-title" id="edit-title">新規作成</div>
-  </div>
-  <div class="edit-body">
-
-    <!-- 基本情報 -->
-    <div class="card">
-      <div class="form-section">
-        <label class="form-label">日付</label>
-        <input type="date" id="f-date" class="form-input" />
-      </div>
-      <div class="form-section">
-        <label class="form-label">競馬場</label>
-        <div class="toggle-group" id="venue-group">
-          <!-- JSで生成 -->
-        </div>
-      </div>
-      <div class="form-section" style="margin-bottom:0">
-        <label class="form-label">レース番号</label>
-        <div class="toggle-group" id="race-num-group">
-          <!-- JSで生成 -->
-        </div>
-      </div>
-    </div>
-
-    <!-- 注目馬 -->
-    <div class="card">
-      <label class="form-label">注目馬</label>
-      <div id="horses-container"></div>
-      <button class="btn btn-secondary" style="width:100%;margin-top:4px" onclick="addHorse()">＋ 馬を追加</button>
-    </div>
-
-    <!-- 買い目 -->
-    <div class="card">
-      <label class="form-label">買い目</label>
-      <div id="bets-container"></div>
-      <button class="btn btn-secondary" style="width:100%;margin-top:4px" onclick="addBet()">＋ 買い目を追加</button>
-    </div>
-
-    <!-- 反省 -->
-    <div class="card">
-      <div class="form-section">
-        <label class="form-label">反省タグ</label>
-        <div class="toggle-group" id="review-tags-group">
-          <!-- JSで生成 -->
-        </div>
-      </div>
-      <div class="form-section" style="margin-bottom:0">
-        <label class="form-label">コメント</label>
-        <textarea id="f-comment" class="form-input" placeholder="自由にメモ…"></textarea>
-      </div>
-    </div>
-
-    <!-- 保存ボタン -->
-    <button class="btn btn-primary" style="margin:0 0 16px" onclick="saveRecord()">💾 保存する</button>
-  </div>
-</div>
-
-<!-- ===========================
-     画面③：詳細
-=========================== -->
-<div id="screen-detail" class="screen">
-  <div class="page-header">
-    <button class="back-btn" onclick="goList()">‹</button>
-    <div class="page-title">詳細</div>
-  </div>
-  <div class="detail-body">
-    <div id="detail-content"></div>
-    <div style="display:flex;gap:10px;margin-top:16px">
-      <button class="btn btn-secondary" style="flex:1" id="detail-edit-btn">✏️ 編集</button>
-      <button class="btn btn-danger" style="flex:1" id="detail-delete-btn">🗑 削除</button>
-    </div>
-  </div>
-</div>
-
-<!-- ===========================
-     騎手選択モーダル
-=========================== -->
-<div class="modal-overlay" id="jockey-modal">
-  <div class="modal-sheet">
-    <div class="modal-title">騎手を選択</div>
-    <div class="jockey-grid" id="jockey-grid"></div>
-    <div class="modal-input-row">
-      <input type="text" id="jockey-custom-input" placeholder="手入力（名前）" />
-      <button class="btn btn-primary" style="width:auto;padding:10px 16px;font-size:14px" onclick="addCustomJockey()">追加</button>
-    </div>
-    <button class="btn btn-secondary" style="width:100%;margin-top:12px" onclick="closeJockeyModal()">キャンセル</button>
-  </div>
-</div>
-
-<!-- ===========================
-     削除確認ダイアログ
-=========================== -->
-<div class="confirm-overlay" id="confirm-dialog">
-  <div class="confirm-box">
-    <h3>削除しますか？</h3>
-    <p>この記録は完全に削除されます。</p>
-    <div class="confirm-btns">
-      <button class="btn btn-secondary" onclick="closeConfirm()">キャンセル</button>
-      <button class="btn btn-danger" id="confirm-ok-btn">削除</button>
-    </div>
-  </div>
-</div>
-
-<script>
-/* ============================================================
-   定数
-============================================================ */
-const VENUES      = ['札幌','函館','福島','新潟','東京','中山','中京','京都','阪神','小倉'];
-const RACE_NUMS   = ['1R','2R','3R','4R','5R','6R','7R','8R','9R','10R','11R','12R'];
-const ROLES       = ['本命','対抗','単穴','穴','消し'];
-const REASONS     = ['展開','騎手','血統','人気妙味','直感'];
-const BET_TYPES   = ['単勝','複勝','馬連','ワイド','三連複','三連単'];
-const REVIEW_TAGS = ['展開ミス','馬選びミス','買い方ミス','惜しい','見送り正解'];
-const DEFAULT_JOCKEYS = [
-  'C.ルメール','川田将雅','武豊','横山武史','坂井瑠星',
-  '戸崎圭太','松山弘平','M.デムーロ','横山和生'
-];
-const LS_KEY      = 'keibaNote_records';
-const LS_JOCKEYS  = 'keibaNote_jockeys';
-
-/* ============================================================
-   状態
-============================================================ */
-let records  = [];       // 全記録
-let editId   = null;     // 編集中のID（nullなら新規）
-let detailId = null;     // 詳細表示中のID
-let horses   = [];       // 編集中の注目馬リスト
-let bets     = [];       // 編集中の買い目リスト
-let selVenue = '';       // 選択中の競馬場
-let selRaceNum = '';     // 選択中のレース番号
-let selReviewTags = [];  // 選択中の反省タグ
-let jockeyModalCallback = null; // 騎手選択後のコールバック
-let customJockeys = [];  // ユーザーが追加した騎手
-
-/* ============================================================
-   LocalStorage 操作
-============================================================ */
-function loadData() {
-  try { records = JSON.parse(localStorage.getItem(LS_KEY) || '[]'); } catch { records = []; }
-  try { customJockeys = JSON.parse(localStorage.getItem(LS_JOCKEYS) || '[]'); } catch { customJockeys = []; }
-}
-function saveData() {
-  localStorage.setItem(LS_KEY, JSON.stringify(records));
-}
-function saveJockeys() {
-  localStorage.setItem(LS_JOCKEYS, JSON.stringify(customJockeys));
-}
-
-/* ============================================================
-   画面切り替え
-============================================================ */
-function showScreen(id) {
-  document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
-  document.getElementById(id).classList.add('active');
-  window.scrollTo(0, 0);
-}
-function goList() { renderList(); showScreen('screen-list'); }
-
-/* ============================================================
-   一覧画面
-============================================================ */
-function renderList() {
-  loadData();
-  const container = document.getElementById('race-list-container');
-  const empty     = document.getElementById('empty-state');
-  const summary   = document.getElementById('list-summary');
-
-  // 新しい順にソート
-  const sorted = [...records].sort((a, b) => b.createdAt - a.createdAt);
-
-  if (sorted.length === 0) {
-    container.innerHTML = '';
-    empty.style.display = 'block';
-    summary.textContent = '記録なし';
-    return;
-  }
-  empty.style.display = 'none';
-
-  // 合計収支
-  const totalPnl = sorted.reduce((sum, r) => sum + calcPnl(r), 0);
-  summary.textContent = `${sorted.length}件 / 収支合計 ${fmtPnl(totalPnl)}`;
-
-  container.innerHTML = sorted.map(r => {
-    const pnl = calcPnl(r);
-    const pnlClass = pnl > 0 ? 'pnl-plus' : pnl < 0 ? 'pnl-minus' : 'pnl-zero';
-    return `
-      <div class="card race-card" onclick="openDetail('${r.id}')">
-        <div class="race-card-header">
-          <div>
-            <div class="race-card-title">${esc(r.venue || '―')} ${esc(r.raceNum || '―')}</div>
-            <div class="race-card-date">${esc(r.date || '')}</div>
-          </div>
-          <div class="race-card-pnl ${pnlClass}">${fmtPnl(pnl)}</div>
-        </div>
-        <div class="race-card-meta">
-          ${r.horses.length > 0 ? `<span class="badge">🐎 ${r.horses.map(h=>esc(h.name)).join('・')}</span>` : ''}
-          ${r.bets.length > 0 ? `<span class="badge">💴 購入 ${r.bets.reduce((s,b)=>s+(b.amount||0),0).toLocaleString()}円</span>` : ''}
-        </div>
-      </div>`;
-  }).join('');
-}
-
-/* ============================================================
-   編集画面を開く
-============================================================ */
-function openEdit(id) {
-  loadData();
-  editId = id;
-  document.getElementById('edit-title').textContent = id ? '編集' : '新規作成';
-
-  if (id) {
-    const r = records.find(x => x.id === id);
-    if (!r) return;
-    document.getElementById('f-date').value    = r.date || todayStr();
-    selVenue                                    = r.venue || '';
-    selRaceNum                                  = r.raceNum || '';
-    horses                                      = JSON.parse(JSON.stringify(r.horses || []));
-    bets                                        = JSON.parse(JSON.stringify(r.bets || []));
-    selReviewTags                               = [...(r.reviewTags || [])];
-    document.getElementById('f-comment').value  = r.comment || '';
-  } else {
-    document.getElementById('f-date').value = todayStr();
-    selVenue = ''; selRaceNum = '';
-    horses = []; bets = []; selReviewTags = [];
-    document.getElementById('f-comment').value = '';
+  if(!snap.exists()){
+    // 新規ユーザー
+    const newDoc={
+      uid,gqId,gorillaName:"ゴリラ",
+      xp:0,bananas:100,resetAt:null,
+      createdAt:serverTimestamp(),
+      // ゲームデータ初期値
+      totalXP:0,partXP:{},exercises:{},sessions:[],
+      totalSessions:0,maxStreak:0,level:1,totalProtein:0,
+      nightRecord:false,morningRecord:false,noonRecord:false,
+      prCount:0,totalSets:0,maxWeight:0,maxDailySessions:0,
+      workoutLog:[],menuRecords:0
+    };
+    await setDoc(ref,newDoc);
+    return{userData:newDoc,gameData:buildGameData(newDoc)};
   }
 
-  renderVenueGroup();
-  renderRaceNumGroup();
-  renderHorses();
-  renderBets();
-  renderReviewTags();
-  showScreen('screen-edit');
-}
-
-/* ===== 競馬場ボタン生成 ===== */
-function renderVenueGroup() {
-  document.getElementById('venue-group').innerHTML = VENUES.map(v =>
-    `<button class="toggle-btn ${selVenue===v?'active':''}" onclick="selVenue='${v}';renderVenueGroup()">${v}</button>`
-  ).join('');
-}
-/* ===== レース番号ボタン生成 ===== */
-function renderRaceNumGroup() {
-  document.getElementById('race-num-group').innerHTML = RACE_NUMS.map(n =>
-    `<button class="toggle-btn ${selRaceNum===n?'active':''}" onclick="selRaceNum='${n}';renderRaceNumGroup()">${n}</button>`
-  ).join('');
-}
-/* ===== 反省タグボタン生成 ===== */
-function renderReviewTags() {
-  document.getElementById('review-tags-group').innerHTML = REVIEW_TAGS.map(t =>
-    `<button class="toggle-btn ${selReviewTags.includes(t)?'active':''}" onclick="toggleTag('${t}')">${t}</button>`
-  ).join('');
-}
-function toggleTag(t) {
-  selReviewTags.includes(t)
-    ? (selReviewTags = selReviewTags.filter(x=>x!==t))
-    : selReviewTags.push(t);
-  renderReviewTags();
-}
-
-/* ============================================================
-   注目馬
-============================================================ */
-function addHorse() {
-  horses.push({ name:'', role:'', stars:0, jockey:'', reasons:[] });
-  renderHorses();
-}
-function removeHorse(i) {
-  horses.splice(i, 1);
-  renderHorses();
-}
-function renderHorses() {
-  document.getElementById('horses-container').innerHTML = horses.map((h, i) => `
-    <div class="horse-card">
-      <div class="horse-card-header">
-        <div class="horse-card-title">馬 ${i+1}</div>
-        <button class="remove-btn" onclick="removeHorse(${i})">×</button>
-      </div>
-      <div class="form-section">
-        <label class="form-label">馬名</label>
-        <input class="form-input" value="${esc(h.name)}" placeholder="例）ディープインパクト"
-          oninput="horses[${i}].name=this.value" />
-      </div>
-      <div class="form-section">
-        <label class="form-label">役割</label>
-        <div class="toggle-group">
-          ${ROLES.map(r=>`<button class="toggle-btn ${h.role===r?'active':''}"
-            onclick="horses[${i}].role='${r}';renderHorses()">${r}</button>`).join('')}
-        </div>
-      </div>
-      <div class="form-section">
-        <label class="form-label">評価</label>
-        <div class="star-group">
-          ${[1,2,3].map(s=>`<button class="star-btn ${h.stars>=s?'active':''}"
-            onclick="horses[${i}].stars=${s};renderHorses()">★</button>`).join('')}
-        </div>
-      </div>
-      <div class="form-section">
-        <label class="form-label">騎手</label>
-        <button class="btn btn-secondary" style="width:100%;justify-content:flex-start;gap:8px"
-          onclick="openJockeyModal(${i})">
-          <span>👤</span>
-          <span>${h.jockey ? esc(h.jockey) : '選択・入力する'}</span>
-        </button>
-      </div>
-      <div class="form-section" style="margin-bottom:0">
-        <label class="form-label">予想理由</label>
-        <div class="toggle-group">
-          ${REASONS.map(r=>`<button class="toggle-btn ${h.reasons&&h.reasons.includes(r)?'active':''}"
-            onclick="toggleHorseReason(${i},'${r}')">${r}</button>`).join('')}
-        </div>
-      </div>
-    </div>`).join('');
-}
-function toggleHorseReason(i, r) {
-  if (!horses[i].reasons) horses[i].reasons = [];
-  horses[i].reasons.includes(r)
-    ? (horses[i].reasons = horses[i].reasons.filter(x=>x!==r))
-    : horses[i].reasons.push(r);
-  renderHorses();
-}
-
-/* ============================================================
-   騎手モーダル
-============================================================ */
-function openJockeyModal(horseIndex) {
-  jockeyModalCallback = (name) => { horses[horseIndex].jockey = name; renderHorses(); };
-  renderJockeyGrid();
-  document.getElementById('jockey-modal').classList.add('open');
-  document.getElementById('jockey-custom-input').value = '';
-}
-function closeJockeyModal() {
-  document.getElementById('jockey-modal').classList.remove('open');
-}
-function renderJockeyGrid() {
-  const all = [...new Set([...DEFAULT_JOCKEYS, ...customJockeys])];
-  document.getElementById('jockey-grid').innerHTML = all.map(j =>
-    `<div class="jockey-item" onclick="selectJockey('${esc(j)}')">${esc(j)}</div>`
-  ).join('');
-}
-function selectJockey(name) {
-  if (jockeyModalCallback) jockeyModalCallback(name);
-  closeJockeyModal();
-}
-function addCustomJockey() {
-  const val = document.getElementById('jockey-custom-input').value.trim();
-  if (!val) return;
-  if (!customJockeys.includes(val)) {
-    customJockeys.push(val);
-    saveJockeys();
-  }
-  selectJockey(val);
-}
-
-/* ============================================================
-   買い目
-============================================================ */
-function addBet() {
-  bets.push({ type:'', amount:0, result:'none', payout:0 });
-  renderBets();
-}
-function removeBet(i) { bets.splice(i,1); renderBets(); }
-function renderBets() {
-  document.getElementById('bets-container').innerHTML = bets.map((b, i) => `
-    <div class="bet-block">
-      <div class="horse-card-header">
-        <div class="horse-card-title">買い目 ${i+1}</div>
-        <button class="remove-btn" onclick="removeBet(${i})">×</button>
-      </div>
-      <div class="form-section">
-        <label class="form-label">券種</label>
-        <div class="toggle-group">
-          ${BET_TYPES.map(t=>`<button class="toggle-btn ${b.type===t?'active':''}"
-            onclick="bets[${i}].type='${t}';renderBets()">${t}</button>`).join('')}
-        </div>
-      </div>
-      <div class="form-section">
-        <label class="form-label">金額</label>
-        <div class="amount-row">
-          <button class="amount-btn minus" onclick="adjustAmount(${i},-500)">−500</button>
-          <button class="amount-btn minus" onclick="adjustAmount(${i},-100)">−100</button>
-          <div class="amount-display">${(b.amount||0).toLocaleString()}円</div>
-          <button class="amount-btn" onclick="adjustAmount(${i},100)">+100</button>
-          <button class="amount-btn" onclick="adjustAmount(${i},500)">+500</button>
-        </div>
-      </div>
-      <div class="form-section">
-        <label class="form-label">結果</label>
-        <div class="result-group">
-          <button class="result-btn ${b.result==='none'?'active-none':''}" onclick="bets[${i}].result='none';renderBets()">―</button>
-          <button class="result-btn ${b.result==='hit'?'active-hit':''}" onclick="bets[${i}].result='hit';renderBets()">的中</button>
-          <button class="result-btn ${b.result==='miss'?'active-miss':''}" onclick="bets[${i}].result='miss';renderBets()">ハズレ</button>
-        </div>
-      </div>
-      ${b.result==='hit' ? `
-      <div class="form-section" style="margin-bottom:0">
-        <label class="form-label">払戻金</label>
-        <input class="form-input" type="number" inputmode="numeric" value="${b.payout||0}"
-          placeholder="0" onchange="bets[${i}].payout=Number(this.value)||0" />
-      </div>` : ''}
-    </div>`).join('');
-}
-function adjustAmount(i, delta) {
-  bets[i].amount = Math.max(0, (bets[i].amount || 0) + delta);
-  renderBets();
-}
-
-/* ============================================================
-   保存
-============================================================ */
-function saveRecord() {
-  const date = document.getElementById('f-date').value;
-  const comment = document.getElementById('f-comment').value;
-  if (!date) { alert('日付を入力してください'); return; }
-  if (!selVenue) { alert('競馬場を選択してください'); return; }
-
-  const record = {
-    id:         editId || genId(),
-    createdAt:  editId ? (records.find(r=>r.id===editId)?.createdAt || Date.now()) : Date.now(),
-    updatedAt:  Date.now(),
-    date, venue: selVenue, raceNum: selRaceNum,
-    horses: horses.map(h => ({...h})),
-    bets:   bets.map(b => ({...b})),
-    reviewTags: [...selReviewTags],
-    comment
-  };
-
-  if (editId) {
-    const idx = records.findIndex(r => r.id === editId);
-    if (idx !== -1) records[idx] = record;
-  } else {
-    records.push(record);
-  }
-  saveData();
-  goList();
-}
-
-/* ============================================================
-   詳細画面
-============================================================ */
-function openDetail(id) {
-  loadData();
-  detailId = id;
-  const r = records.find(x => x.id === id);
-  if (!r) return;
-
-  const pnl = calcPnl(r);
-  const pnlClass = pnl > 0 ? 'pnl-plus' : pnl < 0 ? 'pnl-minus' : 'pnl-zero';
-  const totalBet = r.bets.reduce((s,b)=>s+(b.amount||0),0);
-  const totalPay = r.bets.reduce((s,b)=>s+(b.result==='hit'?b.payout:0),0);
-
-  let html = `
-    <div class="card" style="margin-top:16px">
-      <div class="detail-pnl ${pnlClass}">${fmtPnl(pnl)}</div>
-      <div class="detail-row"><span class="detail-key">日付</span><span class="detail-val">${esc(r.date)}</span></div>
-      <div class="detail-row"><span class="detail-key">競馬場</span><span class="detail-val">${esc(r.venue||'―')}</span></div>
-      <div class="detail-row"><span class="detail-key">レース</span><span class="detail-val">${esc(r.raceNum||'―')}</span></div>
-      <div class="detail-row"><span class="detail-key">投資</span><span class="detail-val">${totalBet.toLocaleString()}円</span></div>
-      <div class="detail-row"><span class="detail-key">払戻</span><span class="detail-val">${totalPay.toLocaleString()}円</span></div>
-    </div>`;
-
-  if (r.horses.length > 0) {
-    html += `<div class="detail-section-title">🐎 注目馬</div>`;
-    r.horses.forEach(h => {
-      html += `<div class="card" style="margin-top:4px">
-        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
-          <strong>${esc(h.name||'―')}</strong>
-          ${h.role ? `<span class="role-tag role-${h.role}">${h.role}</span>` : ''}
-          <span>${'★'.repeat(h.stars||0)+'☆'.repeat(3-(h.stars||0))}</span>
-        </div>
-        ${h.jockey ? `<div style="margin-top:6px;font-size:13px;color:#888">👤 ${esc(h.jockey)}</div>` : ''}
-        ${h.reasons&&h.reasons.length>0 ? `<div style="margin-top:6px;font-size:13px;color:#888">理由：${h.reasons.join('・')}</div>` : ''}
-      </div>`;
-    });
-  }
-
-  if (r.bets.length > 0) {
-    html += `<div class="detail-section-title">💴 買い目</div>`;
-    r.bets.forEach(b => {
-      const icon = b.result==='hit'?'✅':b.result==='miss'?'❌':'―';
-      html += `<div class="card" style="margin-top:4px">
-        <div style="display:flex;justify-content:space-between;align-items:center">
-          <span>${esc(b.type||'―')} / ${(b.amount||0).toLocaleString()}円</span>
-          <span>${icon}${b.result==='hit'?` ${(b.payout||0).toLocaleString()}円`:''}</span>
-        </div>
-      </div>`;
-    });
-  }
-
-  if (r.reviewTags.length > 0 || r.comment) {
-    html += `<div class="detail-section-title">📝 反省</div><div class="card" style="margin-top:4px">`;
-    if (r.reviewTags.length>0) html += `<div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:${r.comment?'10px':'0'}">${r.reviewTags.map(t=>`<span class="badge">${esc(t)}</span>`).join('')}</div>`;
-    if (r.comment) html += `<div style="font-size:14px;color:#555;white-space:pre-wrap">${esc(r.comment)}</div>`;
-    html += `</div>`;
-  }
-
-  document.getElementById('detail-content').innerHTML = html;
-  document.getElementById('detail-edit-btn').onclick   = () => openEdit(id);
-  document.getElementById('detail-delete-btn').onclick = () => confirmDelete(id);
-  showScreen('screen-detail');
-}
-
-/* ============================================================
-   削除
-============================================================ */
-function confirmDelete(id) {
-  document.getElementById('confirm-dialog').classList.add('open');
-  document.getElementById('confirm-ok-btn').onclick = () => {
-    records = records.filter(r => r.id !== id);
-    saveData();
-    closeConfirm();
-    goList();
+  const d=snap.data();
+  return{
+    userData:d,
+    gameData:buildGameData(d)
   };
 }
-function closeConfirm() {
-  document.getElementById('confirm-dialog').classList.remove('open');
+
+// Firestoreドキュメントからゲームデータを抽出（friends/menus含む）
+function buildGameData(d){
+  return{
+    totalXP:d.totalXP||0,
+    partXP:d.partXP||{},
+    exercises:d.exercises||{},
+    sessions:d.sessions||[],
+    totalSessions:d.totalSessions||0,
+    maxStreak:d.maxStreak||0,
+    level:d.level||1,
+    totalProtein:d.totalProtein||0,
+    nightRecord:d.nightRecord||false,
+    morningRecord:d.morningRecord||false,
+    noonRecord:d.noonRecord||false,
+    prCount:d.prCount||0,
+    totalSets:d.totalSets||0,
+    maxWeight:d.maxWeight||0,
+    maxDailySessions:d.maxDailySessions||0,
+    workoutLog:d.workoutLog||[],
+    menuRecords:d.menuRecords||0,
+    friends:d.friends||[],
+    menus:d.menus||DEFAULT_MENUS
+  };
 }
 
-/* ============================================================
-   バックアップ（エクスポート / インポート）
-============================================================ */
-function exportJSON() {
-  loadData();
-  const blob = new Blob([JSON.stringify(records, null, 2)], { type: 'application/json' });
-  const a = document.createElement('a');
-  a.href = URL.createObjectURL(blob);
-  a.download = `keibaNote_${todayStr()}.json`;
-  a.click();
+// ── バトルスコア更新 ──────────────────────────────────────
+async function syncBattleScore(uid,currentTotalXP){
+  try{
+    const q1=query(collection(db,"battles"),where("challengerId","==",uid),where("status","==","active"));
+    const q2=query(collection(db,"battles"),where("opponentId","==",uid),where("status","==","active"));
+    const[s1,s2]=await Promise.all([getDocs(q1),getDocs(q2)]);
+    const updates=[];
+    s1.forEach(d=>{const base=d.data().challengerBaseXP||0;updates.push(updateDoc(doc(db,"battles",d.id),{challengerScore:Math.max(0,currentTotalXP-base)}));});
+    s2.forEach(d=>{const base=d.data().opponentBaseXP||0;updates.push(updateDoc(doc(db,"battles",d.id),{opponentScore:Math.max(0,currentTotalXP-base)}));});
+    await Promise.all(updates);
+  }catch(e){console.log("syncBattleScore err",e);}
 }
-function importJSON(event) {
-  const file = event.target.files[0];
-  if (!file) return;
-  const reader = new FileReader();
-  reader.onload = e => {
-    try {
-      const data = JSON.parse(e.target.result);
-      if (!Array.isArray(data)) throw new Error();
-      records = data;
-      saveData();
-      renderList();
-      alert(`✅ ${data.length}件をインポートしました`);
-    } catch {
-      alert('❌ インポートに失敗しました。正しいJSONファイルか確認してください。');
+
+// ── バトル終了処理（二重実行防止・報酬は1回のみ） ────────
+async function finalizeBattle(battleId,battle){
+  try{
+    // まず現在のステータスを確認（二重処理防止）
+    const snap=await getDoc(doc(db,"battles",battleId));
+    if(!snap.exists()||snap.data().status==="finished")return;
+
+    const cs=battle.challengerScore||0,os=battle.opponentScore||0;
+    let winnerId="draw",loserId=null;
+    if(cs>os){winnerId=battle.challengerId;loserId=battle.opponentId;}
+    else if(os>cs){winnerId=battle.opponentId;loserId=battle.challengerId;}
+
+    const batch=writeBatch(db);
+    // バトルをfinishedに更新
+    batch.update(doc(db,"battles",battleId),{
+      status:"finished",
+      winnerId:winnerId,
+      endAt:Timestamp.fromDate(new Date())
+    });
+    // バナナ増減（引き分け時は変動なし）
+    if(winnerId!=="draw"&&loserId){
+      batch.update(doc(db,"users",winnerId),{bananas:increment(10)});
+      batch.update(doc(db,"users",loserId),{bananas:increment(-5)});
     }
-  };
-  reader.readAsText(file);
-  event.target.value = '';
+    await batch.commit();
+  }catch(e){console.log("finalizeBattle err",e);}
 }
 
-/* ============================================================
-   ユーティリティ
-============================================================ */
-// 収支計算
-function calcPnl(r) {
-  const totalBet = r.bets.reduce((s,b)=>s+(b.amount||0),0);
-  const totalPay = r.bets.reduce((s,b)=>s+(b.result==='hit'?b.payout:0),0);
-  return totalPay - totalBet;
-}
-// 収支表示
-function fmtPnl(v) {
-  if (v === 0) return '±0円';
-  return (v > 0 ? '+' : '') + v.toLocaleString() + '円';
-}
-// 今日の日付
-function todayStr() {
-  return new Date().toLocaleDateString('sv-SE'); // YYYY-MM-DD
-}
-// ユニークID
-function genId() {
-  return Date.now().toString(36) + Math.random().toString(36).slice(2,6);
-}
-// XSS対策
-function esc(str) {
-  return String(str ?? '')
-    .replace(/&/g,'&amp;').replace(/</g,'&lt;')
-    .replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+// ── React ────────────────────────────────────────────────
+var h=React.createElement,useState=React.useState,useEffect=React.useEffect,useCallback=React.useCallback,useRef=React.useRef;
+
+// ── 定数 ──────────────────────────────────────────────────
+var PARTS=["胸","背中","脚","腕","肩"];
+var PART_COLOR={"胸":"#ff6666","背中":"#6699ff","脚":"#66ff66","腕":"#ffaa44","肩":"#cc66ff"};
+var PRESETS={"胸":["ベンチプレス","ダンベルフライ","ケーブルクロスオーバー","ディップス","インクラインプレス"],"背中":["デッドリフト","ラットプルダウン","ベントオーバーロウ","チンアップ"],"脚":["スクワット","レッグプレス","ランジ","レッグカール"],"腕":["バーベルカール","ハンマーカール","トライセプスプレスダウン","スカルクラッシャー"],"肩":["ショルダープレス","サイドレイズ","フロントレイズ","フェイスプル"]};
+var BASE_URL="https://urashitaiki-debug.github.io/gorilla-quest/";
+var GORILLA_IMGS=[BASE_URL+"stage0.png",BASE_URL+"stage1.png",BASE_URL+"stage2.png",BASE_URL+"stage3.png",BASE_URL+"stage4.png"];
+var STAGE_LABELS=["あかちゃんゴリラ","こゴリラ","わかゴリラ","おとなゴリラ","さいきょうゴリラ"];
+var VALID_MS=2*60*60*1000;
+var BATTLE_DURATION_MS=3*24*60*60*1000;
+var SK="gorilla_quest_v4",CK="gorilla_checkin_v1",MK="gorilla_menus_v1",FK="gorilla_friends_v1",NK="gorilla_name_v1";
+var DEFAULT_MENUS=[{name:"メニューA",items:[{exercise:"ベンチプレス",weight:60,reps:10,sets:3},{exercise:"ダンベルフライ",weight:20,reps:10,sets:3}]},{name:"メニューB",items:[{exercise:"スクワット",weight:60,reps:10,sets:3},{exercise:"レッグプレス",weight:80,reps:10,sets:3}]},{name:"メニューC",items:[{exercise:"デッドリフト",weight:70,reps:10,sets:3},{exercise:"ラットプルダウン",weight:50,reps:10,sets:3}]}];
+var ROULETTE_TABLE=[{label:"1.5倍",mult:1.5,color:"#44ff44",prob:0.7},{label:"2倍",mult:2.0,color:"#ffdd00",prob:0.25},{label:"3倍",mult:3.0,color:"#ff4444",prob:0.05}];
+
+var INIT={totalXP:0,partXP:{},exercises:{},sessions:[],totalSessions:0,maxStreak:0,level:1,totalProtein:0,nightRecord:false,morningRecord:false,noonRecord:false,prCount:0,totalSets:0,maxWeight:0,maxDailySessions:0,workoutLog:[],menuRecords:0};
+
+function levelInfo(xp){var lv=1,rem=xp,needed=100;while(rem>=needed){rem-=needed;lv++;needed=Math.floor(needed*1.3);}return{level:lv,current:rem,needed};}
+function partLevelInfo(xp){var lv=1,rem=xp,needed=50;while(rem>=needed){rem-=needed;lv++;needed=Math.floor(needed*1.4);}return{level:lv,current:rem,needed};}
+function getToday(){return new Date().toISOString().slice(0,10);}
+function getHour(){return new Date().getHours();}
+function daysDiff(a,b){return Math.floor((new Date(b)-new Date(a))/86400000);}
+function getStreak(dates){if(!dates.length)return 0;var uniq=[...new Set(dates)].sort().reverse();var s=1;for(var i=0;i<uniq.length-1;i++){if((new Date(uniq[i])-new Date(uniq[i+1]))/86400000===1)s++;else break;}return s;}
+function getStage(lv){if(lv<3)return 0;if(lv<6)return 1;if(lv<10)return 2;if(lv<15)return 3;return 4;}
+function fmtTime(ms){var m=Math.floor(ms/60000);var s=Math.floor((ms%60000)/1000);return m+"分"+("0"+s).slice(-2)+"秒";}
+function fmtCd(endAt){if(!endAt)return"--:--";var end=endAt.toDate?endAt.toDate().getTime():endAt;var diff=Math.max(0,end-Date.now());var m=Math.floor(diff/60000);var s=Math.floor((diff%60000)/1000);return("0"+m).slice(-2)+":"+("0"+s).slice(-2);}
+function getPartForEx(ex){var f="胸";Object.keys(PRESETS).forEach(p=>{if(PRESETS[p].includes(ex))f=p;});return f;}
+function calcDegradePenalty(lastDate){if(!lastDate)return 0;var diff=daysDiff(lastDate,getToday());if(diff<3)return 0;if(diff===3)return 15;if(diff===4)return 23;return 30*(diff-4)+23;}
+function rollRoulette(){var r=Math.random(),cum=0;for(var i=0;i<ROULETTE_TABLE.length;i++){cum+=ROULETTE_TABLE[i].prob;if(r<cum)return ROULETTE_TABLE[i];}return ROULETTE_TABLE[0];}
+
+// ── ペンタゴンチャート ──────────────────────────────────
+function PentagonChart({partXP={},size=140}){
+  var cx=size/2,cy=size/2+8,r=size*0.30,labelR=r+22;
+  var angles=PARTS.map((_,i)=>(i*72-90)*Math.PI/180);
+  var pts=PARTS.map((p,i)=>{var lv=Math.min(partLevelInfo(partXP[p]||0).level,10);return[cx+r*(lv/10)*Math.cos(angles[i]),cy+r*(lv/10)*Math.sin(angles[i])];});
+  var bgPts=angles.map(a=>[cx+r*Math.cos(a),cy+r*Math.sin(a)]);
+  return h("svg",{width:size,height:size+10,style:{display:"block",overflow:"visible"}},
+    h("polygon",{points:bgPts.map(p=>p.join(",")).join(" "),fill:"rgba(68,136,255,0.1)",stroke:"#4444aa",strokeWidth:1}),
+    h("polygon",{points:pts.map(p=>p.join(",")).join(" "),fill:"rgba(255,221,0,0.25)",stroke:"#ffdd00",strokeWidth:2}),
+    PARTS.map((p,i)=>{var lv=partLevelInfo(partXP[p]||0).level;var tx=cx+labelR*Math.cos(angles[i]),ty=cy+labelR*Math.sin(angles[i]);return h("g",{key:p},h("text",{x:tx,y:ty,textAnchor:"middle",dominantBaseline:"middle",fontSize:9,fill:PART_COLOR[p],style:{fontFamily:"'DotGothic16',monospace"}},p),h("text",{x:tx,y:ty+11,textAnchor:"middle",dominantBaseline:"middle",fontSize:9,fill:"#aaa",style:{fontFamily:"'DotGothic16',monospace"}},"L"+lv));})
+  );
 }
 
-/* ============================================================
-   起動処理
-============================================================ */
-loadData();
-renderList();
+// ── バトルカード ──────────────────────────────────────────
+function BattleCard({battle,currentUid,onFinalize}){
+  var[cd,setCd]=useState("");
+  var isC=battle.challengerId===currentUid;
+  var myScore=isC?(battle.challengerScore||0):(battle.opponentScore||0);
+  var oppScore=isC?(battle.opponentScore||0):(battle.challengerScore||0);
+  var myName=isC?battle.challengerName:battle.opponentName;
+  var oppName=isC?battle.opponentName:battle.challengerName;
+  var total=myScore+oppScore;
+  var myPct=total>0?Math.round(myScore/total*100):50;
+  useEffect(()=>{
+    if(battle.status!=="active"||!battle.endAt)return;
+    function tick(){var end=battle.endAt.toDate?battle.endAt.toDate().getTime():battle.endAt;if(Date.now()>=end&&onFinalize)onFinalize(battle.id,battle);setCd(fmtCd(battle.endAt));}
+    tick();var t=setInterval(tick,1000);return()=>clearInterval(t);
+  },[battle]);
+  var won=battle.status==="finished"&&battle.winnerId===currentUid;
+  var lost=battle.status==="finished"&&battle.winnerId&&battle.winnerId!==currentUid&&battle.winnerId!=="draw";
+  return h("div",{className:"dq-win",style:{padding:"10px",marginBottom:8}},
+    h("div",{style:{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:6}},
+      h("span",{style:{fontSize:11,color:battle.status==="active"?"#44ff44":"#aaa"}},battle.status==="active"?"⚔ バトル中！":"🏁 しゅうりょう"),
+      battle.status==="active"&&h("span",{style:{fontSize:12,color:"#ffdd00"}},"⏱ "+cd)
+    ),
+    h("div",{style:{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}},
+      h("div",{style:{textAlign:"center",flex:1}},h("div",{style:{fontSize:11,color:"#ffdd00",marginBottom:2}},myName),h("div",{style:{fontSize:24,color:"#44ff44",fontWeight:"bold"}},myScore),h("div",{style:{fontSize:9,color:"#aaa"}},"スコア")),
+      h("div",{style:{fontSize:16,color:"#ff4444"}},"VS"),
+      h("div",{style:{textAlign:"center",flex:1}},h("div",{style:{fontSize:11,color:"#ffdd00",marginBottom:2}},oppName),h("div",{style:{fontSize:24,color:"#ff6666",fontWeight:"bold"}},oppScore),h("div",{style:{fontSize:9,color:"#aaa"}},"スコア"))
+    ),
+    battle.status==="active"&&h("div",{style:{marginBottom:6}},
+      h("div",{style:{height:12,background:"#001100",border:"1px solid #336633",overflow:"hidden",borderRadius:2,position:"relative"}},
+        h("div",{style:{height:"100%",width:myPct+"%",background:"#44ff44",transition:"width 0.5s",borderRadius:2}}),
+        h("div",{style:{position:"absolute",inset:0,display:"flex",alignItems:"center",justifyContent:"center",fontSize:9,color:"rgba(255,255,255,0.7)",pointerEvents:"none"}},myPct+"% vs "+(100-myPct)+"%")
+      )
+    ),
+    battle.status==="finished"&&h("div",{style:{textAlign:"center",padding:"6px"}},
+      won?h("div",{style:{fontSize:14,color:"#ffdd00"}},"🏆 あなたのかち！ +10🍌"):
+      lost?h("div",{style:{fontSize:14,color:"#aaa"}},"はいぼく… -5🍌"):
+      h("div",{style:{fontSize:14,color:"#aaa"}},"ひきわけ")
+    )
+  );
+}
 
-// Service Worker 登録
-if ('serviceWorker' in navigator) {
-  window.addEventListener('load', () => {
-    navigator.serviceWorker.register('./sw.js')
-      .then(() => console.log('SW registered'))
-      .catch(e => console.warn('SW registration failed:', e));
+// ── フレンドカード ────────────────────────────────────────
+function FriendCard({fd,fid,onRemove,onBattle,battleStatus}){
+  var stage=getStage(fd.level||1);
+  return h("div",{className:"dq-win",style:{padding:"10px 12px",marginBottom:8}},
+    h("div",{style:{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:8}},
+      h("div",{style:{display:"flex",alignItems:"center",gap:8}},
+        h("div",{style:{width:48,height:48,overflow:"hidden",flexShrink:0,display:"flex",alignItems:"center",justifyContent:"center"}},h("img",{src:GORILLA_IMGS[stage],style:{width:96,height:96,objectFit:"contain",imageRendering:"pixelated"}})),
+        h("div",null,h("div",{style:{fontSize:13,color:"#ffdd00"}},fd.gorillaName||"ゴリラ"),h("div",{style:{fontSize:10,color:"#4488ff"}},"ID: "+fid),h("div",{style:{fontSize:10,color:"#aaa"}},"LV"+(fd.level||1)+" 🍌"+(fd.bananas||0)))
+      ),
+      h("div",{style:{display:"flex",flexDirection:"column",gap:4}},
+        h("button",{className:"dq-btn",onClick:onRemove,style:{fontSize:10,padding:"3px 7px",color:"#ff4444",border:"1px solid #ff4444"}},"さくじょ"),
+        battleStatus==="active"
+          ?h("button",{className:"dq-btn",style:{fontSize:10,padding:"3px 7px",color:"#aaa",border:"1px solid #555",cursor:"default"}},"バトル中")
+          :h("button",{className:"dq-btn",onClick:onBattle,style:{fontSize:10,padding:"3px 7px",color:"#ff6666",border:"1px solid #ff6666"}},"⚔ たいせん")
+      )
+    ),
+    h("div",{style:{display:"flex",justifyContent:"center"}},h(PentagonChart,{partXP:fd.partXP||{},size:150}))
+  );
+}
+
+// ── バトル履歴カード（コンパクト表示） ──────────────────
+function BattleHistoryCard({battle,currentUid}){
+  var isC=battle.challengerId===currentUid;
+  var myScore=isC?(battle.challengerScore||0):(battle.opponentScore||0);
+  var oppScore=isC?(battle.opponentScore||0):(battle.challengerScore||0);
+  var oppName=isC?battle.opponentName:battle.challengerName;
+  var won=battle.winnerId===currentUid;
+  var draw=battle.winnerId==="draw";
+  var resultLabel=won?"かち":draw?"ひきわけ":"まけ";
+  var resultColor=won?"#ffdd00":draw?"#888":"#aaa";
+  // endAtをMM/DD形式に
+  var dateStr="--/--";
+  if(battle.endAt){
+    var d=battle.endAt.toDate?battle.endAt.toDate():new Date(battle.endAt);
+    dateStr=(d.getMonth()+1)+"/"+(d.getDate());
+  }
+  return h("div",{style:{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"8px 10px",borderBottom:"1px solid #111144",fontSize:12}},
+    h("div",{style:{color:"#aaa",width:36,flexShrink:0}},dateStr),
+    h("div",{style:{flex:1,color:"#fff",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",padding:"0 6px"}},"vs "+oppName),
+    h("div",{style:{color:"#aaa",marginRight:8,whiteSpace:"nowrap"}},myScore+" vs "+oppScore),
+    h("div",{style:{color:resultColor,fontWeight:"bold",width:36,textAlign:"right",flexShrink:0}},resultLabel)
+  );
+}
+function DQBar({value,max,color,width="100%"}){var pct=Math.min(Math.round((value/max)*100),100);return h("div",{style:{width,height:10,background:"#001100",border:"1px solid #336633",display:"inline-block",verticalAlign:"middle"}},h("div",{style:{height:"100%",width:pct+"%",background:color,transition:"width 0.4s"}}));}
+function Stepper({value,onChange,step=5,min=0}){return h("div",{style:{display:"flex",alignItems:"center"}},h("button",{className:"dq-btn",onClick:()=>onChange(Math.max(min,value-step)),style:{width:32,textAlign:"center",padding:"4px",fontSize:14}},"◀"),h("span",{style:{flex:1,textAlign:"center",fontSize:13,color:"#ffdd00",background:"#000011",padding:"5px 0",border:"2px solid #4444aa",borderLeft:"none",borderRight:"none"}},value),h("button",{className:"dq-btn",onClick:()=>onChange(value+step),style:{width:32,textAlign:"center",padding:"4px",fontSize:14}},"▶"));}
+function LevelUpOverlay({level,onDone}){useEffect(()=>{var t=setTimeout(onDone,2800);return()=>clearTimeout(t);},[]);return h("div",{style:{position:"fixed",inset:0,zIndex:1000,display:"flex",alignItems:"center",justifyContent:"center",pointerEvents:"none"}},h("div",{style:{animation:"flash 0.3s ease 2",background:"rgba(255,255,100,0.12)",position:"absolute",inset:0}}),h("div",{className:"dq-win",style:{padding:"20px 32px",textAlign:"center",animation:"levelup 2.8s ease forwards",border:"4px solid #ffdd00"}},h("div",{style:{fontSize:13,color:"#ffdd00",marginBottom:8}},"✦ ✦ ✦"),h("div",{style:{fontSize:18,color:"#ffdd00",lineHeight:1.8}},"レベルが あがった！",h("br"),h("span",{style:{fontSize:24,color:"#fff"}},"Lv."+level)),h("div",{style:{fontSize:13,color:"#ffdd00",marginTop:8}},"✦ ✦ ✦")));}
+function XPPop({xp,onDone}){useEffect(()=>{var t=setTimeout(onDone,1400);return()=>clearTimeout(t);},[]);return h("div",{style:{position:"fixed",top:"30%",left:"50%",transform:"translateX(-50%)",zIndex:900,pointerEvents:"none",animation:"xpPop 1.4s ease forwards",fontSize:20,color:"#ffdd00",textShadow:"0 0 8px #ffdd00"}},"＋"+xp+"XP");}
+function DegradePop({xp,onDone}){useEffect(()=>{var t=setTimeout(onDone,2500);return()=>clearTimeout(t);},[]);return h("div",{style:{position:"fixed",top:"25%",left:"50%",transform:"translateX(-50%)",zIndex:900,pointerEvents:"none",animation:"degrade 2.5s ease forwards",textAlign:"center"}},h("div",{style:{fontSize:16,color:"#ff4444",textShadow:"0 0 8px #ff0000"}},"▼ "+xp+"XP げんしょう"),h("div",{style:{fontSize:11,color:"#ff8888",marginTop:4}},"さぼりは禁物！"));}
+function BananaSwipe({onSlide}){
+  var[x,setX]=useState(0),[done,setDone]=useState(false),[drag,setDrag]=useState(false);
+  var startX=useRef(0);var trackW=260,thumbW=60,maxX=trackW-thumbW;
+  var onStart=e=>{if(done)return;e.preventDefault();setDrag(true);startX.current=(e.touches?e.touches[0].clientX:e.clientX)-x;};
+  var onMove=e=>{if(!drag||done)return;e.preventDefault();var nx=Math.min(maxX,Math.max(0,(e.touches?e.touches[0].clientX:e.clientX)-startX.current));setX(nx);if(nx>=maxX-4){setDone(true);setDrag(false);setTimeout(onSlide,300);}};
+  return h("div",{style:{position:"fixed",inset:0,zIndex:2400,background:"rgba(0,0,0,0.88)",display:"flex",alignItems:"center",justifyContent:"center"}},
+    h("div",{className:"dq-win",style:{padding:"24px 20px",textAlign:"center",border:"4px solid #ffdd00",width:320}},
+      h("div",{style:{fontSize:14,color:"#ffdd00",marginBottom:6}},"★ ゴリラのきぶんがよさそうだぞ？"),
+      h("div",{style:{fontSize:11,color:"#aaa",marginBottom:20}},"バナナをスライドしてルーレットをまわせ！"),
+      h("div",{style:{width:trackW,height:56,background:"#000022",border:"3px solid #4444aa",borderRadius:28,margin:"0 auto",position:"relative",overflow:"hidden",cursor:"pointer",touchAction:"none"},onMouseDown:onStart,onMouseMove:onMove,onMouseUp:()=>setDrag(false),onMouseLeave:()=>setDrag(false),onTouchStart:onStart,onTouchMove:onMove,onTouchEnd:()=>setDrag(false)},
+        h("div",{style:{position:"absolute",inset:0,display:"flex",alignItems:"center",justifyContent:"center",fontSize:11,color:"#444",userSelect:"none",pointerEvents:"none"}},done?"":"→ →  スライド  → →"),
+        h("div",{style:{position:"absolute",top:4,left:4+x,width:thumbW-8,height:44,borderRadius:22,background:done?"#44ff44":"#ffdd00",display:"flex",alignItems:"center",justifyContent:"center",fontSize:28,userSelect:"none",pointerEvents:"none"}},done?"✓":"🍌")
+      )
+    )
+  );
+}
+function RouletteOverlay({onResult}){
+  var[phase,setPhase]=useState(0),[result,setResult]=useState(null),[idx,setIdx]=useState(0);
+  var t=useRef(null);
+  useEffect(()=>{var count=0,speed=80;function spin(){setIdx(i=>(i+1)%ROULETTE_TABLE.length);count++;speed=Math.min(speed+8,400);if(count<25)t.current=setTimeout(spin,speed);else{var r=rollRoulette();setResult(r);setPhase(2);}}t.current=setTimeout(spin,speed);return()=>clearTimeout(t.current);},[]);
+  var cur=ROULETTE_TABLE[idx];
+  return h("div",{style:{position:"fixed",inset:0,zIndex:2500,background:"rgba(0,0,0,0.85)",display:"flex",alignItems:"center",justifyContent:"center",touchAction:"auto"}},
+    h("div",{className:"dq-win",style:{padding:"24px 32px",textAlign:"center",border:"4px solid #ffdd00",minWidth:280}},
+      h("div",{style:{fontSize:13,color:"#ffdd00",marginBottom:12}},"★ ゴリラのきぶんがいい！★"),
+      phase<2?h("div",{style:{animation:"rouletteSpin 0.3s infinite"}},h("div",{style:{fontSize:36,color:cur.color,marginBottom:8}},"✦"),h("div",{style:{fontSize:28,color:cur.color}},"けいけんち "+cur.label),h("div",{style:{fontSize:12,color:"#aaa",marginTop:8}},"ルーレット中...")):
+      h("div",null,h("div",{style:{fontSize:36,color:result.color,marginBottom:8}},"★"),h("div",{style:{fontSize:28,color:result.color}},result.label),h("div",{style:{fontSize:13,color:"#fff",marginTop:8,marginBottom:16}},"けいけんちが "+result.label+" になる！"),h("button",{onClick:e=>{e.stopPropagation();onResult(result);},style:{width:"100%",textAlign:"center",padding:"14px",color:"#ffdd00",border:"3px solid #ffdd00",fontSize:15,background:"#000066",cursor:"pointer",fontFamily:"'DotGothic16',monospace",zIndex:2600}},"▶▶ トレーニングかいし！"))
+    )
+  );
+}
+function MenuEditor({menu,onSave,onClose}){
+  var[name,setName]=useState(menu.name),[items,setItems]=useState(menu.items.map(i=>({...i}))),[addPart,setAddPart]=useState("胸");
+  var upd=(idx,k,v)=>setItems(prev=>{var a=prev.map(x=>({...x}));a[idx][k]=v;return a;});
+  var del=idx=>setItems(prev=>prev.filter((_,i)=>i!==idx));
+  return h("div",{style:{position:"fixed",inset:0,zIndex:3000,background:"rgba(0,0,0,0.9)",overflowY:"auto",padding:"12px"}},
+    h("div",{className:"dq-win",style:{padding:"12px",maxWidth:430,margin:"0 auto"}},
+      h("div",{style:{fontSize:14,color:"#ffdd00",marginBottom:12}},"▼ メニューへんしゅう"),
+      h("input",{className:"dq-input",value:name,onChange:e=>setName(e.target.value),style:{width:"100%",fontSize:14,marginBottom:10}}),
+      items.map((item,idx)=>{
+        var ip=getPartForEx(item.exercise);
+        return h("div",{key:idx,className:"dq-win",style:{padding:"8px",marginBottom:8,borderColor:"#4444aa"}},
+          h("div",{style:{display:"flex",justifyContent:"space-between",marginBottom:6}},
+            h("div",{style:{fontSize:11,color:"#aaa"}},"しゅもく "+(idx+1)),
+            h("button",{className:"dq-btn",onClick:()=>del(idx),style:{fontSize:11,padding:"2px 8px",color:"#ff4444",border:"1px solid #ff4444"}},"✕")
+          ),
+          h("div",{style:{display:"flex",gap:3,marginBottom:6}},
+            PARTS.map(p=>h("button",{key:p,className:"dq-btn "+(ip===p?"active":""),onClick:()=>upd(idx,"exercise",PRESETS[p][0]),style:{flex:1,fontSize:10,padding:"4px 2px",textAlign:"center",color:ip===p?PART_COLOR[p]:"#aaa",borderBottom:ip===p?"2px solid "+PART_COLOR[p]:"2px solid transparent"}},p))
+          ),
+          h("select",{className:"dq-input",value:item.exercise,onChange:e=>upd(idx,"exercise",e.target.value),style:{width:"100%",marginBottom:6,fontSize:12}},
+            PRESETS[ip].map(e=>h("option",{key:e,value:e},e))
+          ),
+          h("div",{style:{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:6}},
+            [["じゅうりょう",item.weight,"weight",5,0],["かいすう",item.reps,"reps",1,1],["セット",item.sets,"sets",1,1]].map(f=>
+              h("div",{key:f[0]},
+                h("div",{style:{fontSize:9,color:"#aaa",marginBottom:2,textAlign:"center"}},f[0]),
+                h("div",{style:{display:"flex"}},
+                  h("button",{className:"dq-btn",onClick:()=>upd(idx,f[2],Math.max(f[4],f[1]-f[3])),style:{width:26,textAlign:"center",padding:"2px",fontSize:12}},"◀"),
+                  h("span",{style:{flex:1,textAlign:"center",fontSize:12,color:"#ffdd00",background:"#000011",padding:"3px 0",border:"2px solid #4444aa",borderLeft:"none",borderRight:"none"}},f[1]),
+                  h("button",{className:"dq-btn",onClick:()=>upd(idx,f[2],f[1]+f[3]),style:{width:26,textAlign:"center",padding:"2px",fontSize:12}},"▶")
+                )
+              )
+            )
+          )
+        );
+      }),
+      items.length<10&&h("div",{className:"dq-win",style:{padding:"8px",marginBottom:8,borderColor:"#44ff44"}},h("div",{style:{fontSize:11,color:"#44ff44",marginBottom:6}},"▼ しゅもくをついか"),h("div",{style:{display:"flex",gap:3,marginBottom:6}},PARTS.map(p=>h("button",{key:p,className:"dq-btn "+(addPart===p?"active":""),onClick:()=>setAddPart(p),style:{flex:1,fontSize:10,padding:"4px 2px",textAlign:"center",color:addPart===p?PART_COLOR[p]:"#aaa",borderBottom:addPart===p?"2px solid "+PART_COLOR[p]:"2px solid transparent"}},p))),h("div",{style:{display:"flex",flexWrap:"wrap",gap:4}},PRESETS[addPart].map(e=>h("button",{key:e,className:"dq-btn",onClick:()=>setItems(prev=>[...prev,{exercise:e,weight:60,reps:10,sets:3}]),style:{fontSize:11,padding:"5px 8px",color:"#44ff44",border:"1px solid #44ff44"}},e)))),
+      h("div",{style:{display:"flex",gap:8}},h("button",{className:"dq-btn",onClick:onClose,style:{flex:1,textAlign:"center",padding:"10px",color:"#ff4444",border:"2px solid #ff4444"}},"キャンセル"),h("button",{className:"dq-btn",onClick:()=>onSave({name,items}),style:{flex:1,textAlign:"center",padding:"10px",color:"#ffdd00",border:"2px solid #ffdd00"}},"ほぞん"))
+    )
+  );
+}
+function NameEditor({current,onSave,onClose}){
+  var[name,setName]=useState(current||"ゴリラ");
+  return h("div",{style:{position:"fixed",inset:0,zIndex:3000,background:"rgba(0,0,0,0.85)",display:"flex",alignItems:"center",justifyContent:"center"}},h("div",{className:"dq-win",style:{padding:"20px",width:280,textAlign:"center"}},h("div",{style:{fontSize:13,color:"#ffdd00",marginBottom:12}},"▼ なまえをつける"),h("input",{className:"dq-input",value:name,onChange:e=>setName(e.target.value),maxLength:10,style:{width:"100%",fontSize:15,textAlign:"center",marginBottom:12}}),h("div",{style:{display:"flex",gap:8}},h("button",{className:"dq-btn",onClick:onClose,style:{flex:1,textAlign:"center",padding:"10px",color:"#ff4444",border:"2px solid #ff4444"}},"キャンセル"),h("button",{className:"dq-btn",onClick:()=>onSave(name),style:{flex:1,textAlign:"center",padding:"10px",color:"#ffdd00",border:"2px solid #ffdd00"}},"ほぞん"))));
+}
+function LoginScreen(){
+  var[loading,setLoading]=useState(false),[err,setErr]=useState("");
+  async function go(){setLoading(true);setErr("");try{await signInWithPopup(auth,new GoogleAuthProvider());}catch(e){setErr("ログインに失敗しました");}setLoading(false);}
+  return h("div",{style:{minHeight:"100vh",display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",padding:24,background:"#0a0a1a"}},h("div",{style:{textAlign:"center",marginBottom:32}},h("div",{style:{fontSize:24,color:"#ffdd00",letterSpacing:2,marginBottom:8}},"★ GORILLA QUEST ★"),h("div",{style:{fontSize:12,color:"#aaa"}},"トレーニングでゴリラをそだてよう！")),h("div",{style:{fontSize:64,marginBottom:24}},"🦍"),h("div",{className:"dq-win",style:{padding:"24px",width:"100%",maxWidth:320,textAlign:"center"}},h("div",{style:{fontSize:13,color:"#ffdd00",marginBottom:16}},"Googleでログイン"),h("button",{className:"dq-btn",onClick:go,style:{width:"100%",textAlign:"center",padding:"14px",color:"#fff",border:"2px solid #4488ff",fontSize:14}},loading?"ログイン中...":"🔵 Googleでログイン"),err&&h("div",{style:{fontSize:11,color:"#ff4444",marginTop:8}},err)));
+}
+
+// ══════════════════════════════════════════════════════════
+// メインアプリ
+// ══════════════════════════════════════════════════════════
+function App(){
+  var[authUser,setAuthUser]=useState(null);
+  var[authLoading,setAuthLoading]=useState(true);
+  var[userDoc,setUserDoc]=useState(null); // Firestoreのユーザードキュメント
+  var[data,setData]=useState(INIT);       // ゲームデータ（Firestoreがマスター）
+  var[gqId,setGqId]=useState("");
+  var[dataReady,setDataReady]=useState(false); // Firestoreからの復元完了フラグ
+  var[tab,setTab]=useState("log");
+  var[gorillaName,setGorillaName]=useState("ゴリラ");
+  var[part,setPart]=useState("胸");
+  var[exercise,setExercise]=useState(PRESETS["胸"][0]);
+  var[weight,setWeight]=useState(60);
+  var[reps,setReps]=useState(10);
+  var[sets,setSets]=useState(3);
+  var[lvAnim,setLvAnim]=useState(null);
+  var[xpAnim,setXpAnim]=useState(null);
+  var[degradeAnim,setDegradeAnim]=useState(null);
+  var[showReset,setShowReset]=useState(false);
+  var[logMode,setLogMode]=useState("menu");
+  var[selMenu,setSelMenu]=useState(0);
+  var[editMenu,setEditMenu]=useState(null);
+  var[showNameEditor,setShowNameEditor]=useState(false);
+  var[showRoulette,setShowRoulette]=useState(false);
+  var[showBanana,setShowBanana]=useState(false);
+  var[xpMult,setXpMult]=useState(1);
+  var[checkIn,setCheckIn]=useState(()=>{try{var c=JSON.parse(localStorage.getItem(CK)||"null");return c&&(Date.now()-c.startTime<VALID_MS)?c:null;}catch(e){return null;}});
+  var[remaining,setRemaining]=useState(null);
+  var[menus,setMenus]=useState(DEFAULT_MENUS);
+  var[friends,setFriends]=useState([]);
+  var[friendSearch,setFriendSearch]=useState("");
+  var[friendResult,setFriendResult]=useState(null);
+  var[friendLoading,setFriendLoading]=useState(false);
+  var[friendDetails,setFriendDetails]=useState({});
+  var[battles,setBattles]=useState([]);
+  var[notifStatus,setNotifStatus]=useState(()=>{
+    if(typeof Notification==="undefined")return"unsupported";
+    return Notification.permission;
   });
+
+  // 通知許可をリクエスト
+  async function handleRequestNotif(){
+    if(!authUser||!messaging)return;
+    await requestNotificationPermission(authUser.uid);
+    setNotifStatus(Notification.permission);
+  } // リセット日時（バトル履歴フィルタ用）
+  var timerRef=useRef(null);
+  var finalizedRef=useRef(new Set());
+
+  // ── 認証監視＋Firestoreからデータ復元 ──────────────────
+  useEffect(()=>{
+    return onAuthStateChanged(auth,async u=>{
+      setAuthUser(u);
+      if(u){
+        // Firestoreからデータ復元（マスターデータ）
+        var{userData,gameData}=await loadUserFromFirestore(u.uid);
+        // Firestoreのデータを優先してStateに反映
+        setData(gameData);
+        setUserDoc(userData);
+        setGqId(userData.gqId||makeGQId(u.uid));
+        setGorillaName(userData.gorillaName||"ゴリラ");
+        setResetAt(userData.resetAt||null);
+        // friends/menusはFirestoreから復元（localStorageより優先）
+        setFriends(gameData.friends||[]);
+        setMenus(gameData.menus||DEFAULT_MENUS);
+        // localStorageにキャッシュ
+        localStorage.setItem(SK,JSON.stringify(gameData));
+        localStorage.setItem(NK,userData.gorillaName||"ゴリラ");
+        localStorage.setItem(FK,JSON.stringify(gameData.friends||[]));
+        localStorage.setItem(MK,JSON.stringify(gameData.menus||DEFAULT_MENUS));
+        setDataReady(true);
+      }else{
+        setDataReady(false);
+      }
+      setAuthLoading(false);
+    });
+  },[]);
+
+  // Firestoreユーザードキュメントのリアルタイム監視（バナナ更新用）
+  useEffect(()=>{
+    if(!authUser)return;
+    return onSnapshot(doc(db,"users",authUser.uid),snap=>{if(snap.exists())setUserDoc(snap.data());});
+  },[authUser]);
+
+  // バトルリアルタイム監視（resetAt以降のみ表示）
+  useEffect(()=>{
+    if(!authUser)return;
+    var map={};
+    var order={active:0,finished:1};
+    var refresh=()=>{
+      var all=Object.values(map);
+      // resetAt以降に作成されたバトルのみ表示
+      if(resetAt){
+        var resetMs=resetAt.toDate?resetAt.toDate().getTime():new Date(resetAt).getTime();
+        all=all.filter(b=>{var cat=b.createdAt?.toDate?b.createdAt.toDate().getTime():0;return cat>=resetMs;});
+      }
+      setBattles(all.sort((a,b)=>(order[a.status]??2)-(order[b.status]??2)));
+    };
+    var u1=onSnapshot(query(collection(db,"battles"),where("challengerId","==",authUser.uid)),s=>{s.docs.forEach(d=>{map[d.id]={id:d.id,...d.data()};});refresh();});
+    var u2=onSnapshot(query(collection(db,"battles"),where("opponentId","==",authUser.uid)),s=>{s.docs.forEach(d=>{map[d.id]={id:d.id,...d.data()};});refresh();});
+    return()=>{u1();u2();};
+  },[authUser,resetAt]);
+
+  // チェックインタイマー
+  useEffect(()=>{
+    if(!checkIn){setRemaining(null);return;}
+    function tick(){var left=checkIn.startTime+VALID_MS-Date.now();if(left<=0){setCheckIn(null);localStorage.removeItem(CK);setRemaining(null);return;}setRemaining(left);}
+    tick();timerRef.current=setInterval(tick,1000);return()=>clearInterval(timerRef.current);
+  },[checkIn]);
+
+  // 退化チェック（データ復元後のみ実行）
+  useEffect(()=>{
+    if(!dataReady)return;
+    var lastDate=data.sessions?.slice(-1)[0]||null;
+    if(!lastDate)return;
+    var penalty=calcDegradePenalty(lastDate);
+    if(penalty>0&&data.totalXP>0){var nd={...data,totalXP:Math.max(0,data.totalXP-penalty),level:levelInfo(Math.max(0,data.totalXP-penalty)).level};save(nd);setDegradeAnim(penalty);}
+  },[dataReady]);
+
+  // フレンドデータ取得
+  useEffect(()=>{
+    if(!friends.length)return;
+    friends.forEach(async fid=>{
+      try{var q=query(collection(db,"users"),where("gqId","==",fid));var snap=await getDocs(q);if(!snap.empty)setFriendDetails(prev=>({...prev,[fid]:snap.docs[0].data()}));}catch(e){}
+    });
+  },[friends]);
+
+  var isActive=!!(checkIn&&(Date.now()-checkIn.startTime<VALID_MS));
+  useEffect(()=>{var e=PRESETS[part][0];setExercise(e);setWeight(data.exercises[e]?.maxWeight||60);},[part]);
+  useEffect(()=>{setWeight(data.exercises[exercise]?.maxWeight||60);},[exercise]);
+
+  // ── save：Firestore＋localStorage両方に書く ───────────
+  var save=useCallback((d)=>{
+    setData(d);
+    // localStorageキャッシュ
+    try{localStorage.setItem(SK,JSON.stringify(d));}catch(e){}
+    // Firestoreに書き込む（ゲームデータ＋メタ情報）
+    if(authUser){
+      var gname=gorillaName||"ゴリラ";
+      var gqid=makeGQId(authUser.uid);
+      setDoc(doc(db,"users",authUser.uid),{
+        uid:authUser.uid,gqId:gqid,gorillaName:gname,
+        xp:d.totalXP||0,level:d.level||1,partXP:d.partXP||{},
+        maxStreak:d.maxStreak||0,totalSessions:d.totalSessions||0,
+        lastTraining:d.sessions?.slice(-1)[0]||"なし",
+        // ゲームデータを全フィールド保存
+        totalXP:d.totalXP||0,exercises:d.exercises||{},
+        sessions:d.sessions||[],totalProtein:d.totalProtein||0,
+        nightRecord:d.nightRecord||false,morningRecord:d.morningRecord||false,noonRecord:d.noonRecord||false,
+        prCount:d.prCount||0,totalSets:d.totalSets||0,maxWeight:d.maxWeight||0,
+        maxDailySessions:d.maxDailySessions||0,workoutLog:d.workoutLog||[],
+        menuRecords:d.menuRecords||0,totalSessions:d.totalSessions||0,maxStreak:d.maxStreak||0
+      },{merge:true}).catch(()=>{});
+      // バトルスコア同期
+      syncBattleScore(authUser.uid,d.totalXP||0);
+    }
+  },[authUser,gorillaName]);
+
+  // saveFriends：localStorage＋Firestoreに保存
+  var saveFriends=useCallback(f=>{
+    setFriends(f);
+    try{localStorage.setItem(FK,JSON.stringify(f));}catch(e){}
+    if(authUser){
+      updateDoc(doc(db,"users",authUser.uid),{friends:f}).catch(()=>{});
+    }
+  },[authUser]);
+
+  // saveMenus：localStorage＋Firestoreに保存
+  var saveMenus=useCallback(m=>{
+    setMenus(m);
+    try{localStorage.setItem(MK,JSON.stringify(m));}catch(e){}
+    if(authUser){
+      updateDoc(doc(db,"users",authUser.uid),{menus:m}).catch(()=>{});
+    }
+  },[authUser]);
+  // ── XP記録 ──────────────────────────────────────────────
+  function applyXP(d0,xpList,mult=1){
+    var today=getToday(),hour=getHour();
+    var d={...d0},ns=[...d.sessions],totalXP=d.totalXP,partXP={...d.partXP},exercises={...d.exercises};
+    var totalSets=d.totalSets||0,maxWeight=d.maxWeight||0,prCount=d.prCount||0,allXP=0,logItems=[];
+    xpList.forEach(item=>{
+      var isNew=!exercises[item.exercise],prevMax=exercises[item.exercise]?.maxWeight||0,isPR=item.weight>prevMax&&!isNew;
+      var xp=item.sets*5;
+      if(isPR)xp+=30;
+      ns.push(today);var streak=getStreak(ns);
+      xp=Math.round(xp*mult);totalXP+=xp;allXP+=xp;
+      partXP[item.part]=(partXP[item.part]||0)+(item.sets*5);
+      exercises[item.exercise]={maxWeight:Math.max(item.weight,prevMax),count:(exercises[item.exercise]?.count||0)+1,part:item.part};
+      totalSets+=item.sets;maxWeight=Math.max(maxWeight,item.weight);if(isPR)prCount++;
+      logItems.push({exercise:item.exercise,part:item.part,weight:item.weight,reps:item.reps,sets:item.sets,xp});
+    });
+    var tds=ns.filter(x=>x===today).length,streak=getStreak(ns),lv=levelInfo(totalXP).level;
+    var wl=[{date:today,time:new Date().toLocaleTimeString("ja-JP",{hour:"2-digit",minute:"2-digit"}),items:logItems,xp:allXP},...(d.workoutLog||[])].slice(0,20);
+    d={...d,totalXP,partXP,exercises,sessions:ns,totalSessions:(d.totalSessions||0)+xpList.length,maxStreak:Math.max(d.maxStreak||0,streak),level:lv,prCount,totalSets,maxWeight,maxDailySessions:Math.max(d.maxDailySessions||0,tds),workoutLog:wl,nightRecord:d.nightRecord||(hour>=0&&hour<5),morningRecord:d.morningRecord||(hour>=5&&hour<7),noonRecord:d.noonRecord||(hour>=12&&hour<13)};
+    return{d,allXP,prevLevel:levelInfo(d0.totalXP).level,newLevel:lv};
+  }
+
+  function recordAndSave(xpList){
+    if(!isActive){alert("トレーニングを開始してください！");return;}
+    var r=applyXP(data,xpList,xpMult);save(r.d);setXpAnim(r.allXP);
+    if(r.newLevel>r.prevLevel)setTimeout(()=>setLvAnim(r.newLevel),800);
+  }
+
+  function handleProtein1(){
+    var xp=10,np={...data.partXP};PARTS.forEach(p=>{np[p]=(np[p]||0)+2;});
+    var ntxp=data.totalXP+xp,lv=levelInfo(ntxp).level;
+    save({...data,totalXP:ntxp,partXP:np,level:lv,totalProtein:(data.totalProtein||0)+1});setXpAnim(xp);
+  }
+
+  function onCheckIn(){
+    var doRoulette=Math.random()<0.2;
+    var ci={startTime:Date.now()};setCheckIn(ci);
+    try{localStorage.setItem(CK,JSON.stringify(ci));}catch(e){}
+    save({...data,totalCheckIns:(data.totalCheckIns||0)+1});
+    if(doRoulette)setShowBanana(true);else setXpMult(1);
+  }
+
+  // ── 完全リセット（localStorage＋Firestore） ─────────────
+  async function handleReset(){
+    var now=serverTimestamp();
+    // Firestoreのユーザードキュメントを完全初期化
+    if(authUser){
+      var gqid=makeGQId(authUser.uid);
+      await setDoc(doc(db,"users",authUser.uid),{
+        uid:authUser.uid,gqId:gqid,
+        gorillaName:"ゴリラ",
+        xp:0,bananas:100,
+        resetAt:now, // バトル履歴フィルタ用
+        createdAt:now,
+        totalXP:0,partXP:{},exercises:{},sessions:[],
+        totalSessions:0,maxStreak:0,level:1,totalProtein:0,
+        nightRecord:false,morningRecord:false,noonRecord:false,
+        prCount:0,totalSets:0,maxWeight:0,maxDailySessions:0,
+        workoutLog:[],menuRecords:0,totalCheckIns:0,lastTraining:"なし"
+      });
+    }
+    // localStorageをクリア
+    localStorage.removeItem(SK);
+    localStorage.removeItem(CK);
+    localStorage.removeItem(NK);
+    // Stateをリセット
+    setData(INIT);
+    setGorillaName("ゴリラ");
+    setCheckIn(null);
+    setMenus(DEFAULT_MENUS);
+    setResetAt(now);
+    setShowReset(false);
+    // メニューもデフォルトに戻す
+    saveMenus(DEFAULT_MENUS);
+  }
+
+  // ── バトル申請（即時開始） ────────────────────────────
+  async function handleBattleRequest(targetGQId,targetName,targetUid){
+    if(!authUser)return;
+    var gname=gorillaName||"ゴリラ";
+    var now=new Date(),endAt=new Date(now.getTime()+BATTLE_DURATION_MS);
+    try{
+      await addDoc(collection(db,"battles"),{
+        challengerId:authUser.uid,challengerGQId:gqId,challengerName:gname,
+        challengerBaseXP:data.totalXP||0,challengerScore:0,
+        opponentId:targetUid,opponentGQId:targetGQId,opponentName:targetName,
+        opponentBaseXP:0,opponentScore:0,
+        status:"active",startAt:Timestamp.fromDate(now),endAt:Timestamp.fromDate(endAt),
+        winnerId:null,createdAt:serverTimestamp()
+      });
+      alert("バトルかいし！3日間で競い合って！");
+    }catch(e){alert("バトル申請に失敗しました");}
+  }
+
+  async function handleFinalize(battleId,battle){
+    if(finalizedRef.current.has(battleId))return;
+    finalizedRef.current.add(battleId);
+    await finalizeBattle(battleId,battle);
+  }
+
+  async function handleFriendSearch(){
+    if(!friendSearch.trim())return;
+    setFriendLoading(true);setFriendResult(null);
+    try{
+      var q=query(collection(db,"users"),where("gqId","==",friendSearch.trim()));
+      var snap=await getDocs(q);
+      if(!snap.empty){var fd=snap.docs[0].data();setFriendResult({...fd,docId:snap.docs[0].id});}
+      else setFriendResult("notfound");
+    }catch(e){setFriendResult("notfound");}
+    setFriendLoading(false);
+  }
+
+  function addFriend(fid,fd){if(friends.includes(fid))return;saveFriends([...friends,fid]);setFriendDetails(prev=>({...prev,[fid]:fd}));setFriendResult(null);setFriendSearch("");}
+  function removeFriend(fid){saveFriends(friends.filter(x=>x!==fid));}
+  function getActiveBattle(fGQId){return battles.find(b=>b.status==="active"&&((b.challengerGQId===gqId&&b.opponentGQId===fGQId)||(b.opponentGQId===gqId&&b.challengerGQId===fGQId)));}
+
+  var li=levelInfo(data.totalXP||0);var level=li.level,current=li.current,needed=li.needed;
+  var stage=getStage(level);
+  var lastDate=data.sessions?.slice(-1)[0]||null;
+  var isDegrading=(lastDate?daysDiff(lastDate,getToday()):0)>=3;
+  var degradeDays=lastDate?daysDiff(lastDate,getToday()):0;
+
+  function ts(t){return{flex:1,padding:"9px 0",border:"none",cursor:"pointer",fontSize:12,fontFamily:"'DotGothic16',monospace",background:tab===t?"rgba(92,184,122,0.18)":"rgba(255,255,255,0.05)",color:tab===t?"#5cb87a":"#aaa",boxShadow:tab===t?"inset 0 2px 4px rgba(0,0,0,0.3)":"inset 0 1px 3px rgba(0,0,0,0.2)",transition:"all 0.15s"};}
+
+  if(authLoading||(!authUser?false:!dataReady)){
+    return h("div",{style:{display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",height:"100vh",color:"#ffdd00",fontSize:14,fontFamily:"'DotGothic16',monospace",gap:12}},
+      h("div",{style:{fontSize:32}},"🦍"),
+      h("div",null,"データをよみこみ中...")
+    );
+  }
+  if(!authUser)return h(LoginScreen,null);
+
+  return h("div",{style:{maxWidth:430,margin:"0 auto",padding:"10px 12px",background:"#0a0a1a",minHeight:"100vh"}},
+    showBanana?h(BananaSwipe,{onSlide:()=>{setShowBanana(false);setShowRoulette(true);}}):null,
+    showRoulette?h(RouletteOverlay,{onResult:r=>{setXpMult(r.mult);setShowRoulette(false);}}):null,
+    editMenu!==null?h(MenuEditor,{menu:menus[editMenu],onSave:m=>{var nm=menus.map((x,i)=>i===editMenu?m:x);saveMenus(nm);setEditMenu(null);},onClose:()=>setEditMenu(null)}):null,
+    showNameEditor?h(NameEditor,{current:gorillaName,onSave:n=>{setGorillaName(n);localStorage.setItem(NK,n);if(authUser)updateDoc(doc(db,"users",authUser.uid),{gorillaName:n}).catch(()=>{});setShowNameEditor(false);},onClose:()=>setShowNameEditor(false)}):null,
+    xpAnim?h(XPPop,{xp:xpAnim,onDone:()=>setXpAnim(null)}):null,
+    lvAnim?h(LevelUpOverlay,{level:lvAnim,onDone:()=>setLvAnim(null)}):null,
+    degradeAnim?h(DegradePop,{xp:degradeAnim,onDone:()=>setDegradeAnim(null)}):null,
+
+    // タイトル
+    h("div",{style:{textAlign:"center",marginBottom:8}},
+      h("div",{style:{fontSize:20,color:"#ffdd00",letterSpacing:2}},"★ GORILLA QUEST ★"),
+      h("div",{style:{fontSize:11,color:"#aaa"}},STAGE_LABELS[stage]),
+      h("div",{style:{display:"flex",alignItems:"center",justifyContent:"center",gap:8,marginTop:4}},
+        h("div",{style:{fontSize:10,color:"#4488ff"}},"ID: "+gqId),
+        h("button",{onClick:()=>navigator.clipboard?.writeText(gqId).then(()=>alert("コピーしました！")),style:{background:"none",border:"1px solid #4444aa",color:"#4488ff",fontSize:9,padding:"2px 6px",cursor:"pointer",fontFamily:"'DotGothic16',monospace"}},"コピー"),
+        h("button",{onClick:()=>signOut(auth),style:{background:"none",border:"1px solid #555",color:"#aaa",fontSize:9,padding:"2px 6px",cursor:"pointer",fontFamily:"'DotGothic16',monospace"}},"ログアウト")
+      )
+    ),
+
+    // アバター
+    h("div",{className:"dq-win",style:{padding:"10px 12px",marginBottom:8}},
+      h("div",{style:{display:"flex",gap:12,alignItems:"flex-start"}},
+        h("div",{style:{flexShrink:0,display:"flex",flexDirection:"column",alignItems:"center"}},
+          h("div",{style:{width:90,height:90,display:"flex",alignItems:"center",justifyContent:"center",overflow:"hidden"}},
+            h("img",{src:GORILLA_IMGS[stage],alt:STAGE_LABELS[stage],style:{width:180,height:180,objectFit:"contain",imageRendering:"pixelated"},onError:e=>{e.target.style.display="none";}})
+          ),
+          h("div",{style:{marginTop:4,fontSize:13,color:"#ffaa44",textAlign:"center"}},"🍌 "+(userDoc?.bananas??100)),
+          h("a",{href:"https://www.mtgec.jp/shop/pages/refa_bubble_u.aspx",target:"_blank",style:{display:"block",marginTop:2,background:"#fff",color:"#000033",fontSize:8,padding:"2px 5px",borderRadius:4,border:"2px solid #ffdd00",textDecoration:"none",lineHeight:1.3,textAlign:"center",maxWidth:90,position:"relative"}},
+            "汗の放置は甘えだ",h("span",{style:{fontSize:7,color:"#888"}},"[PR]"),
+            h("div",{style:{position:"absolute",top:-5,left:"50%",transform:"translateX(-50%)",width:0,height:0,borderLeft:"4px solid transparent",borderRight:"4px solid transparent",borderBottom:"5px solid #ffdd00"}})
+          )
+        ),
+        h("div",{style:{flex:1,minWidth:0}},
+          h("div",{style:{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:4}},
+            h("div",{style:{display:"flex",alignItems:"center",gap:4}},
+              h("div",{style:{fontSize:13,color:"#ffdd00"}},gorillaName+" LV"+level),
+              h("button",{onClick:()=>setShowNameEditor(true),style:{background:"none",border:"none",cursor:"pointer",fontSize:12,padding:"0 2px",color:"#aaa"}},"✏️")
+            ),
+            h("button",{onClick:handleProtein1,style:{background:"none",border:"none",cursor:"pointer",fontSize:20,padding:"0 2px"}},"🥤")
+          ),
+          h(DQBar,{value:current,max:needed,color:"#44ff44"}),
+          h("div",{style:{fontSize:10,color:"#aaa",marginTop:1,marginBottom:4}},current+"/"+needed+" XP"),
+          isDegrading?h("div",{style:{fontSize:10,color:"#ff4444",marginBottom:4,animation:"pulse 1s infinite"}},"⚠ "+degradeDays+"日さぼり中！"):null,
+          h("div",{style:{display:"grid",gridTemplateColumns:"1fr 1fr",gap:"3px 4px"}},
+            PARTS.map(p=>{var pi=partLevelInfo((data.partXP||{})[p]||0);return h("div",{key:p,style:{display:"flex",alignItems:"center",gap:2,minWidth:0}},h("span",{style:{fontSize:9,color:PART_COLOR[p],width:18,flexShrink:0}},p),h("div",{style:{flex:1,height:10,background:"#001100",border:"1px solid #336633",minWidth:0,overflow:"hidden"}},h("div",{style:{height:"100%",width:Math.min(Math.round((pi.current/pi.needed)*100),100)+"%",background:PART_COLOR[p],transition:"width 0.4s"}})),h("span",{style:{fontSize:9,color:"#aaa",width:18,flexShrink:0,textAlign:"right"}},"L"+pi.level));})
+          )
+        )
+      )
+    ),
+
+    // チェックイン
+    isActive?
+      h("div",{className:"dq-win",style:{padding:"8px 12px",marginBottom:8,border:"3px solid #44ff44",display:"flex",alignItems:"center",gap:8}},
+        h("div",{style:{flex:1}},
+          h("div",{style:{fontSize:11,color:"#44ff44",animation:"pulse 1s infinite"}},"★ トレーニング中！"),
+          xpMult>1?h("div",{style:{fontSize:11,color:"#ffdd00"}},"けいけんち "+xpMult+"倍ボーナス中！"):null,
+          h("div",{style:{fontSize:11,color:"#aaa",marginTop:2}},"のこり "+fmtTime(remaining||0))
+        )
+      ):
+      h("button",{className:"dq-btn",onClick:onCheckIn,style:{width:"100%",textAlign:"center",fontSize:14,padding:"13px",border:"3px solid #44ff44",color:"#44ff44",marginBottom:8}},"▶ トレーニングかいし！"),
+
+    // タブ
+    h("div",{style:{display:"flex",gap:2,marginBottom:8,background:"rgba(0,0,0,0.3)"}},
+      [["log","▶ きろく"],["history","▶ れきし"],["friends","▶ ともだち"]].map(t=>h("button",{key:t[0],style:ts(t[0]),onClick:()=>setTab(t[0])},t[1]))
+    ),
+
+    // ── LOG ──────────────────────────────────────────────
+    tab==="log"?h("div",{style:{display:"flex",flexDirection:"column",gap:6}},
+      !isActive?h("div",{style:{padding:"10px",textAlign:"center",color:"#ff4444",fontSize:11,background:"#110000",border:"2px solid #ff4444"}},"トレーニングを開始してから記録できます"):null,
+      h("div",{style:{display:"flex",gap:4}},
+        h("button",{className:"dq-btn "+(logMode==="menu"?"active":""),onClick:()=>setLogMode("menu"),style:{flex:1,textAlign:"center",fontSize:12,padding:"8px"}},"▶ メニューきろく"),
+        h("button",{className:"dq-btn "+(logMode==="single"?"active":""),onClick:()=>setLogMode("single"),style:{flex:1,textAlign:"center",fontSize:12,padding:"8px"}},"▶ たんどくきろく")
+      ),
+      logMode==="single"?h("div",{style:{display:"flex",flexDirection:"column",gap:6}},
+        h("div",{className:"dq-win",style:{padding:"10px 12px"}},
+          h("div",{style:{fontSize:11,color:"#aaa",marginBottom:6}},"▼ ぶいをえらぶ"),
+          h("div",{style:{display:"flex",gap:3,marginBottom:12}},PARTS.map(p=>h("button",{key:p,className:"dq-btn "+(part===p?"active":""),onClick:()=>setPart(p),style:{flex:1,fontSize:11,padding:"5px 2px",textAlign:"center",color:part===p?PART_COLOR[p]:"#aaa",borderBottom:part===p?"2px solid "+PART_COLOR[p]:"2px solid transparent"}},p))),
+          h("div",{style:{fontSize:11,color:"#aaa",marginBottom:4}},"▼ しゅもくをえらぶ"),
+          h("select",{className:"dq-input",value:exercise,onChange:e=>setExercise(e.target.value),style:{width:"100%",fontSize:13,marginBottom:12}},PRESETS[part].map(e=>h("option",{key:e,value:e},e))),
+          h("div",{style:{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8}},
+            [["じゅうりょう","kg",weight,setWeight,5,0],["かいすう","かい",reps,setReps,1,1],["セット","set",sets,setSets,1,1]].map(f=>h("div",{key:f[0]},h("div",{style:{fontSize:10,color:"#aaa",marginBottom:4,textAlign:"center"}},f[0]),h(Stepper,{value:f[2],onChange:f[3],step:f[4],min:f[5]}),h("div",{style:{textAlign:"center",fontSize:11,marginTop:2,color:"#aaa"}},f[2]+f[1])))
+          )
+        ),
+        h("button",{className:"dq-btn",onClick:()=>recordAndSave([{exercise,part,weight,reps,sets}]),style:{width:"100%",textAlign:"center",fontSize:15,padding:"12px",border:"3px solid "+(isActive?"#ffdd00":"#555"),color:isActive?"#ffdd00":"#555"}},"▶▶ きろくする")
+      ):null,
+      logMode==="menu"?h("div",{style:{display:"flex",flexDirection:"column",gap:6}},
+        h("div",{style:{display:"flex",gap:3}},menus.map((m,i)=>h("button",{key:i,className:"dq-btn "+(selMenu===i?"active":""),onClick:()=>setSelMenu(i),style:{flex:1,textAlign:"center",fontSize:11,padding:"7px 2px"}},m.name))),
+        h("div",{className:"dq-win",style:{padding:"10px 12px"}},
+          h("div",{style:{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}},h("div",{style:{fontSize:12,color:"#ffdd00"}},menus[selMenu].name),h("button",{className:"dq-btn",onClick:()=>setEditMenu(selMenu),style:{fontSize:11,padding:"4px 8px",color:"#aaa",border:"1px solid #4444aa"}},"へんしゅう")),
+          menus[selMenu].items.map((item,i)=>h("div",{key:i,style:{display:"flex",justifyContent:"space-between",fontSize:12,borderBottom:i<menus[selMenu].items.length-1?"1px solid #111144":"none",padding:"5px 0"}},h("div",null,h("span",{style:{color:PART_COLOR[getPartForEx(item.exercise)]||"#aaa"}},getPartForEx(item.exercise)),h("span",{style:{color:"#fff",marginLeft:6}},item.exercise)),h("span",{style:{color:"#aaa",fontSize:11}},item.weight+"kg "+item.reps+"回 "+item.sets+"set")))
+        ),
+        h("button",{className:"dq-btn",onClick:()=>recordAndSave(menus[selMenu].items.map(item=>({exercise:item.exercise,part:getPartForEx(item.exercise),weight:item.weight,reps:item.reps,sets:item.sets}))),style:{width:"100%",textAlign:"center",fontSize:15,padding:"12px",border:"3px solid "+(isActive?"#ffdd00":"#555"),color:isActive?"#ffdd00":"#555"}},"▶▶ メニューをきろくする（"+menus[selMenu].items.length+"しゅもく）")
+      ):null
+    ):null,
+
+    // ── HISTORY ──────────────────────────────────────────
+    tab==="history"?h("div",null,
+      h("div",{className:"dq-win",style:{padding:"10px 12px",marginBottom:8}},
+        h("div",{style:{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}},
+          [["そうセッション",data.totalSessions||0,"かい"],["さいちょうれんぞく",data.maxStreak||0,"にち"],["しゅもくすう",Object.keys(data.exercises||{}).length,"しゅ"],["プロテイン",data.totalProtein||0,"ぱい"],["さいだいじゅうりょう",data.maxWeight||0,"kg"],["バナナ",userDoc?.bananas??100,"🍌"]].map(it=>h("div",{key:it[0],style:{borderBottom:"1px solid #111144",paddingBottom:6}},h("div",{style:{fontSize:10,color:"#aaa"}},it[0]),h("div",{style:{fontSize:18,color:"#ffdd00"}},it[1],h("span",{style:{fontSize:11,color:"#aaa"}},it[2]))))
+        )
+      ),
+      h("div",{className:"dq-win",style:{padding:"10px 12px",marginBottom:8}},
+        h("div",{style:{fontSize:11,color:"#aaa",marginBottom:8}},"▼ ぶいべつレベル"),
+        PARTS.map(p=>{var pi=partLevelInfo((data.partXP||{})[p]||0);return h("div",{key:p,style:{marginBottom:8}},h("div",{style:{display:"flex",justifyContent:"space-between",fontSize:11,marginBottom:2}},h("span",{style:{color:PART_COLOR[p]}},p+" Lv."+pi.level),h("span",{style:{color:"#aaa"}},pi.current+"/"+pi.needed)),h(DQBar,{value:pi.current,max:pi.needed,color:PART_COLOR[p]}));})
+      ),
+      Object.keys(data.exercises||{}).length>0?h("div",{className:"dq-win",style:{padding:"10px 12px",marginBottom:8}},
+        h("div",{style:{fontSize:11,color:"#aaa",marginBottom:6}},"▼ しゅもくベスト"),
+        Object.entries(data.exercises||{}).map(([name,e])=>h("div",{key:name,style:{display:"flex",justifyContent:"space-between",fontSize:12,borderBottom:"1px solid #111144",padding:"4px 0"}},h("div",null,h("span",{style:{color:"#fff"}},name),h("span",{style:{fontSize:10,marginLeft:6,color:PART_COLOR[e.part]||"#aaa"}},e.part)),h("span",{style:{color:"#aaa"}},e.maxWeight+"kg × "+e.count+"回")))
+      ):null,
+      h("div",{style:{marginTop:8,marginBottom:8}},
+        !showReset
+          ?h("button",{className:"dq-btn",onClick:()=>setShowReset(true),style:{width:"100%",textAlign:"center",fontSize:12,padding:"10px",border:"2px solid #ff4444",color:"#ff4444"}},"▶ データをぜんぶけす")
+          :h("div",{className:"dq-win",style:{padding:"10px 12px",border:"3px solid #ff4444"}},
+              h("div",{style:{fontSize:13,color:"#ff4444",marginBottom:4,textAlign:"center"}},"ほんとうにぜんぶけしますか？"),
+              h("div",{style:{fontSize:10,color:"#aaa",marginBottom:10,textAlign:"center"}},"バナナ・バトル履歴・トレーニング記録がすべて消えます"),
+              h("div",{style:{display:"flex",gap:8}},
+                h("button",{className:"dq-btn",onClick:handleReset,style:{flex:1,textAlign:"center",color:"#ff4444",border:"2px solid #ff4444",fontSize:13,padding:"10px"}},"▶ はい"),
+                h("button",{className:"dq-btn",onClick:()=>setShowReset(false),style:{flex:1,textAlign:"center",color:"#ffdd00",border:"2px solid #ffdd00",fontSize:13,padding:"10px"}},"▶ いいえ")
+              )
+            )
+      ),
+      data.workoutLog?.length>0?h("div",{className:"dq-win",style:{padding:"10px 12px",marginBottom:8}},
+        h("div",{style:{fontSize:11,color:"#aaa",marginBottom:8}},"▼ トレーニングりれき"),
+        data.workoutLog.map((log,i)=>h("div",{key:i,style:{borderBottom:i<data.workoutLog.length-1?"1px solid #111144":"none",paddingBottom:8,marginBottom:8}},h("div",{style:{fontSize:11,color:"#ffdd00"}},log.date+" "+log.time),(log.items||[]).map((it,j)=>h("div",{key:j,style:{fontSize:11,color:"#ccc",marginTop:2}},h("span",{style:{color:PART_COLOR[it.part]||"#aaa"}},it.part)," "+it.exercise+" "+it.weight+"kg×"+it.reps+"×"+it.sets+"set")),h("div",{style:{fontSize:11,color:"#44ff44",marginTop:2}},"+"+log.xp+"XP")))
+      ):null
+    ):null,
+
+    // ── FRIENDS + BATTLE ─────────────────────────────────
+    tab==="friends"?h("div",null,
+      // 通知設定セクション
+      h("div",{className:"dq-win",style:{padding:"10px 12px",marginBottom:8}},
+        h("div",{style:{fontSize:11,color:"#aaa",marginBottom:6}},"▼ つうちせってい"),
+        notifStatus==="granted"
+          ?h("div",{style:{fontSize:12,color:"#44ff44"}},"✓ 通知が有効です")
+          :notifStatus==="unsupported"
+            ?h("div",{style:{fontSize:11,color:"#aaa"}},"このブラウザは通知に非対応です")
+            :h("div",null,
+                h("div",{style:{fontSize:11,color:"#aaa",marginBottom:8}},"ライバルのバトル申請・終了をリアルタイムで受け取ろう！"),
+                h("button",{className:"dq-btn",onClick:handleRequestNotif,style:{width:"100%",textAlign:"center",padding:"10px",color:"#ffdd00",border:"2px solid #ffdd00",fontSize:12}},
+                  "🔔 通知を受け取ってライバルに差をつけよう！"
+                )
+              )
+      ),
+        h("div",{style:{fontSize:11,color:"#aaa",marginBottom:4}},"▼ じぶんのID"),
+        h("div",{style:{display:"flex",alignItems:"center",gap:8,justifyContent:"center"}},
+          h("div",{style:{fontSize:14,color:"#4488ff",letterSpacing:2}},gqId),
+          h("button",{className:"dq-btn",onClick:()=>navigator.clipboard?.writeText(gqId).then(()=>alert("コピーしました！")),style:{fontSize:11,padding:"4px 10px",color:"#ffdd00",border:"1px solid #ffdd00"}},"コピー")
+        ),
+        h("div",{style:{fontSize:10,color:"#666688",textAlign:"center",marginTop:4}},"このIDをともだちにおしえよう")
+      ),
+      // セクションA：進行中バトル
+      battles.filter(b=>b.status==="active").length>0?h("div",{className:"dq-win",style:{padding:"10px 12px",marginBottom:8}},
+        h("div",{style:{fontSize:11,color:"#ff6666",marginBottom:8}},"▼ ⚔ バトル中"),
+        battles.filter(b=>b.status==="active").map(b=>h(BattleCard,{key:b.id,battle:b,currentUid:authUser?.uid,onFinalize:handleFinalize}))
+      ):null,
+      // フレンド検索
+      h("div",{className:"dq-win",style:{padding:"10px 12px",marginBottom:8}},
+        h("div",{style:{fontSize:11,color:"#aaa",marginBottom:6}},"▼ ともだちをけんさく"),
+        h("div",{style:{display:"flex",gap:6,marginBottom:8}},
+          h("input",{className:"dq-input",value:friendSearch,onChange:e=>setFriendSearch(e.target.value),onCompositionEnd:e=>setFriendSearch(e.target.value),placeholder:"GQ-XXXXXX",style:{flex:1,fontSize:13}}),
+          h("button",{className:"dq-btn",onClick:handleFriendSearch,style:{padding:"6px 12px",color:"#ffdd00",border:"2px solid #ffdd00",fontSize:12}},friendLoading?"…":"けんさく")
+        ),
+        friendResult&&friendResult!=="notfound"?h("div",{className:"dq-win",style:{padding:"10px",borderColor:"#4488ff"}},
+          h("div",{style:{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}},
+            h("div",null,h("div",{style:{fontSize:13,color:"#ffdd00"}},friendResult.gorillaName||"ゴリラ"),h("div",{style:{fontSize:11,color:"#aaa"}},"LV"+(friendResult.level||1))),
+            h("button",{className:"dq-btn",onClick:()=>addFriend(friendResult.gqId,friendResult),style:{fontSize:12,padding:"6px 10px",color:"#44ff44",border:"2px solid #44ff44"}},"＋ついか")
+          ),
+          h("div",{style:{display:"flex",justifyContent:"center"}},h(PentagonChart,{partXP:friendResult.partXP||{},size:150}))
+        ):null,
+        friendResult==="notfound"?h("div",{style:{fontSize:12,color:"#ff4444"}},"みつかりませんでした"):null
+      ),
+      // フレンドリスト
+      friends.length>0?h("div",null,
+        h("div",{style:{fontSize:11,color:"#aaa",marginBottom:6}},"▼ ともだちリスト ("+friends.length+"人)"),
+        friends.map(fid=>{
+          var fd=friendDetails[fid];
+          if(!fd)return h("div",{key:fid,className:"dq-win",style:{padding:"10px",marginBottom:8,color:"#aaa",fontSize:12}},"ID: "+fid+" (よみこみ中...)");
+          var ab=getActiveBattle(fid);
+          return h(FriendCard,{key:fid,fd,fid,onRemove:()=>removeFriend(fid),battleStatus:ab?"active":null,onBattle:()=>handleBattleRequest(fid,fd.gorillaName||"ゴリラ",fd.uid)});
+        })
+      ):h("div",{style:{textAlign:"center",color:"#aaa",fontSize:12,padding:20}},"まだともだちがいません"),
+      // セクションB：バトル履歴（最下部）
+      battles.filter(b=>b.status==="finished").length>0?h("div",{className:"dq-win",style:{padding:"10px 12px",marginTop:8,marginBottom:8}},
+        h("div",{style:{fontSize:11,color:"#aaa",marginBottom:6}},"▼ バトル履歴"),
+        battles
+          .filter(b=>b.status==="finished")
+          .sort((a,b)=>{
+            var at=a.endAt?.toDate?a.endAt.toDate().getTime():0;
+            var bt=b.endAt?.toDate?b.endAt.toDate().getTime():0;
+            return bt-at;
+          })
+          .map(b=>h(BattleHistoryCard,{key:b.id,battle:b,currentUid:authUser?.uid}))
+      ):null
+    ):null,
+
+    h("div",{style:{height:24}})
+  );
 }
+ReactDOM.createRoot(document.getElementById("root")).render(React.createElement(App));
 </script>
 </body>
 </html>
